@@ -179,6 +179,9 @@
 
 - name: Pull the container images
   block:
+    # privileged=yes (RouterOS 7.24+) must be set when the container is
+    # created: an image unpacked unprivileged keeps its files owned by the
+    # shifted UID 32768, and s6-overlay then refuses to start as root.
     - name: Pull Remna Node and Caddy without starting them
       ansible.builtin.uri:
         url: "{{ routeros_rest_base_url }}/container/add"
@@ -187,8 +190,8 @@
         body: "{{ item }}"
         status_code: 200
       loop:
-        - {name: remna-node, interface: remna-node, remote-image: "{{ remnanode_image }}", root-dir: /Containers/remna-node, hostname: remna-node, domain-name: remna-node, dns: 192.168.243.1, envlists: remnanode, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true'}
-        - {name: caddy, interface: caddy, remote-image: "{{ caddy_image }}", root-dir: /Containers/caddy, hostname: caddy, domain-name: caddy, dns: 192.168.243.1, mountlists: caddy, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true'}
+        - {name: remna-node, interface: remna-node, remote-image: "{{ remnanode_image }}", root-dir: /Containers/remna-node, hostname: remna-node, domain-name: remna-node, dns: 192.168.243.1, envlists: remnanode, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true', privileged: 'yes'}
+        - {name: caddy, interface: caddy, remote-image: "{{ caddy_image }}", root-dir: /Containers/caddy, hostname: caddy, domain-name: caddy, dns: 192.168.243.1, mountlists: caddy, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true', privileged: 'yes'}
       loop_control:
         label: "{{ item.name }}"
   rescue:
