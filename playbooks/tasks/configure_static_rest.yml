@@ -210,10 +210,9 @@
         body: "{{ item }}"
         status_code: 200
       loop:
-        # Cloudflare resolvers (1.1.1.1 and the cloudflare-dns.com addresses) are
-        # deliberately absent: they geolocate the querying node, so they must be
-        # left to the CLOUDFLARE mangle rule and go out through WARP instead of
-        # being exempted as direct DNS.
+        # 1.1.1.1 and the cloudflare-dns.com addresses are not listed here, so
+        # they match the CLOUDFLARE list and are routed through wg-warp instead
+        # of taking the direct DNS exemption.
         - {address: 9.9.9.9, list: DNS, comment: 'remna: DNS resolver'}
         - {address: 149.112.112.112, list: DNS, comment: 'remna: DNS resolver'}
         - {address: 8.8.8.8, list: DNS, comment: 'remna: DNS resolver'}

@@ -4,9 +4,9 @@
 #   ansible-vault encrypt vars/deploy.yml
 #   ansible-playbook playbooks/deploy_chr.yml -e @vars/deploy.yml --ask-vault-pass
 #
-# Every value below is a placeholder.
+# Every value below is an example value.
 
-# Destructive: the target's system disk is overwritten.  Must be exactly YES.
+# YES allows the image to be written over the target's system disk.
 confirm_dd: "NO"
 
 # The Ubuntu/Debian VPS that becomes a CHR.
@@ -40,7 +40,7 @@ node_region: EU
 node_domain: node.example.com
 caddy_basicauth_user: admin
 caddy_basicauth_password: "change-me"
-# remnanode_secret_key: ""          # Remnawave node secret, empty for now
+# remnanode_secret_key: ""          # SECRET_KEY of the remna-node container, empty by default
 
 # Optional overrides of the sources the playbook uses by default.
 # chr_image_repo: Medium1992/chr-container-rose
