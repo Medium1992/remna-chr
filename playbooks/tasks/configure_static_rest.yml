@@ -21,6 +21,15 @@
       ansible.builtin.set_fact:
         bootstrap_input_drop: >-
           {{ bootstrap_filters.json | selectattr('comment', 'equalto', 'ansible: drop all other input') | first }}
+
+    # Container DNS rules go in front of the port-scan detection rule, so PSD
+    # stays directly before the final input drop.  Without the PSD rule they
+    # go in front of the drop rule.
+    - name: Locate the bootstrap port-scan detection rule
+      ansible.builtin.set_fact:
+        bootstrap_input_anchor: >-
+          {{ (bootstrap_filters.json | selectattr('comment', 'equalto', 'ansible: detect TCP port scanners') | first)
+             | default(bootstrap_input_drop, true) }}
   rescue:
     - name: Record the missing bootstrap drop rule and continue
       ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
@@ -41,12 +50,16 @@
           body: {name: caddy, address: 192.168.243.2/28, gateway: 192.168.243.1}
         - endpoint: interface/veth
           body: {name: remna-node, address: 192.168.243.3/28, gateway: 192.168.243.1}
+        - endpoint: interface/veth
+          body: {name: veth-warp, address: 192.168.243.4/28, gateway: 192.168.243.1}
         - endpoint: interface/bridge
           body: {name: Remna}
         - endpoint: interface/bridge/port
           body: {bridge: Remna, interface: remna-node}
         - endpoint: interface/bridge/port
           body: {bridge: Remna, interface: caddy}
+        - endpoint: interface/bridge/port
+          body: {bridge: Remna, interface: veth-warp}
         - endpoint: ip/address
           body: {address: 192.168.243.1/28, interface: Remna, network: 192.168.243.0, comment: remna-container-network}
       loop_control:
@@ -128,9 +141,9 @@
         failed_stage: Container config, mounts and envs
 
 - name: Allow container DNS through the input chain
-  when: bootstrap_input_drop is defined
+  when: bootstrap_input_anchor is defined
   block:
-    - name: Add container DNS access before bootstrap input drop
+    - name: Add container DNS access before the port-scan detection rule
       ansible.builtin.uri:
         url: "{{ routeros_rest_base_url }}/ip/firewall/filter/add"
         method: POST
@@ -142,7 +155,7 @@
           dst-port: '53'
           in-interface: Remna
           comment: "remna: DNS {{ item.protocol | upper }}"
-          place-before: "{{ bootstrap_input_drop['.id'] }}"
+          place-before: "{{ bootstrap_input_anchor['.id'] }}"
         status_code: 200
       loop:
         - {protocol: udp}
@@ -190,7 +203,7 @@
         body: "{{ item }}"
         status_code: 200
       loop:
-        - {name: remna-node, interface: remna-node, remote-image: "{{ remnanode_image }}", root-dir: /Containers/remna-node, hostname: remna-node, domain-name: remna-node, dns: 192.168.243.1, envlists: remnanode, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true', privileged: 'yes'}
+        - {name: remna-node, interface: 'remna-node,veth-warp', remote-image: "{{ remnanode_image }}", root-dir: /Containers/remna-node, hostname: remna-node, domain-name: remna-node, dns: 192.168.243.1, envlists: remnanode, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true', privileged: 'yes'}
         - {name: caddy, interface: caddy, remote-image: "{{ caddy_image }}", root-dir: /Containers/caddy, hostname: caddy, domain-name: caddy, dns: 192.168.243.1, mountlists: caddy, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true', privileged: 'yes'}
       loop_control:
         label: "{{ item.name }}"
@@ -254,6 +267,14 @@
           comment: 'remna: retain established routing'
         status_code: 200
 
+    - name: Accept traffic arriving from WAN in mangle
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: {action: accept, chain: prerouting, in-interface-list: WAN, comment: 'remna: accept WAN'}
+        status_code: 200
+
     - name: Apply existing WARP connection routing mark before Remna exemptions
       ansible.builtin.uri:
         url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
@@ -282,14 +303,6 @@
       loop_control:
         label: "{{ item.comment }}"
 
-    - name: Accept traffic arriving from WAN in mangle
-      ansible.builtin.uri:
-        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
-        method: POST
-        body_format: json
-        body: {action: accept, chain: prerouting, in-interface-list: WAN, comment: 'remna: accept WAN'}
-        status_code: 200
-
     - name: Keep Caddy certificate traffic outside WARP policy routing
       ansible.builtin.uri:
         url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
@@ -300,6 +313,27 @@
           chain: prerouting
           src-address: 192.168.243.2
           comment: 'remna: accept Caddy'
+        status_code: 200
+
+    # veth-warp is the second interface of remna-node.  After the WhiteList,
+    # DNS and Caddy exemptions above, every new connection from it is marked
+    # for wg-warp; it is the first of the connection marks, so the region
+    # rules below skip it and the final routing-mark rule sends it to wg-warp.
+    - name: Mark every new connection from veth-warp for WARP
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: mark-connection
+          chain: prerouting
+          connection-mark: no-mark
+          connection-state: new
+          dst-address-type: '!local,broadcast,multicast'
+          in-interface: Remna
+          src-address: 192.168.243.4
+          new-connection-mark: WARP
+          comment: 'remna: veth-warp'
         status_code: 200
 
     - name: Add EU WARP mangle rules through REST

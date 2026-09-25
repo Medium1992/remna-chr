@@ -94,7 +94,8 @@ inventory `inventory/controller.yml`. Параметры передаются ч
   reverse-proxy, MAC-server, neighbor discovery, bandwidth-server; IPv6
   отключён. Правило PSD
   в `input` добавляет источник в `PortScanners` на сутки, правило `raw`
-  отбрасывает трафик из `PortScanners`.
+  отбрасывает трафик из `PortScanners`. Правила DNS для bridge `Remna`
+  добавляются перед PSD; PSD — предпоследнее правило `input`.
 - **WARP.** Интерфейс `wg-warp`, регистрация публичного ключа в API Cloudflare,
   peer, адрес, NAT и таблица маршрутизации `wg-warp`. При ошибке регистрации
   peer и адрес создаются со стандартными значениями Cloudflare и комментарием
@@ -102,13 +103,16 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 - **Контейнеры.** Bridge `Remna` (`192.168.243.0/28`), veth-интерфейсы,
   Caddyfile, правила DNS для bridge, dst-nat TCP/443 и TCP/563 (для 563 —
   только из `WhiteList`), контейнеры `remna-node` и `caddy` с
-  `privileged=yes` (RouterOS 7.24+). Контейнеры создаются и загружаются без
-  запуска.
-- **Policy routing** для трафика с bridge `Remna`: при `node_region=EU` в
-  таблицу `wg-warp` маркируются соединения к `LIST_RU`, `CLOUDFLARE` и
-  `GEO_IP_DETECT`; при `node_region=RU` — все соединения, кроме адресов из
-  `DNS` и `WhiteList`. Не маркируются трафик контейнера `caddy`
-  (`192.168.243.2`) и трафик самого CHR.
+  `privileged=yes` (RouterOS 7.24+). У `remna-node` два интерфейса:
+  `remna-node` (`192.168.243.3`) и `veth-warp` (`192.168.243.4`). Контейнеры
+  создаются и загружаются без запуска.
+- **Policy routing** для трафика с bridge `Remna`. Не маркируются:
+  соединения к адресам из `DNS` и `WhiteList`, трафик контейнера `caddy`
+  (`192.168.243.2`), трафик к адресам CHR и собственный трафик CHR. Остальные
+  новые соединения маркируются в таблицу `wg-warp`:
+  - с `veth-warp` (`192.168.243.4`) — все;
+  - при `node_region=EU` — к `LIST_RU`, `CLOUDFLARE` и `GEO_IP_DETECT`;
+  - при `node_region=RU` — все.
 - **Raw drop.** Для всего трафика: источник или назначение в `SKIPA_CIDR`,
   назначение в `MAX` и `Telega`, TCP-порты 25, 465, 587. Для трафика с bridge
   `Remna`: назначение в `ABUSE_CINS`, `ABUSE_SPAMHAUS`, `TOR_NODES`. Эти три

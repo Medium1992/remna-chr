@@ -33,7 +33,9 @@
    bandwidth-server отключаются.
 5. Правило PSD `21,3s,3,1` в `input` добавляет источник в `PortScanners` на
    один день; правило `raw prerouting` отбрасывает трафик с источником из
-   `PortScanners`. Исключения для `WhiteList` нет.
+   `PortScanners`. Исключения для `WhiteList` нет. На втором этапе правила
+   DNS для bridge `Remna` добавляются перед PSD, PSD остаётся предпоследним
+   правилом `input`.
 
 Последовательность записи: SysRq emergency remount, пауза,
 `dd bs=1024 conv=fsync`, пауза, SysRq sync, пауза, SysRq reboot.
@@ -47,11 +49,16 @@
 
 - WARP: WireGuard-интерфейс `wg-warp`, регистрация ключа в API Cloudflare,
   peer, адрес, NAT, таблица и маршрут `wg-warp`, `wg-warp` в `WAN`;
-- bridge `Remna`, veth-интерфейсы, каталоги, Caddyfile, envs/mounts,
-  контейнеры `remna-node` и `caddy` (`remnanode_image`, `caddy_image`) с
+- bridge `Remna`, veth-интерфейсы `caddy`, `remna-node`, `veth-warp`,
+  каталоги, Caddyfile, envs/mounts, контейнеры `remna-node` (интерфейсы
+  `remna-node` и `veth-warp`) и `caddy` (`remnanode_image`, `caddy_image`) с
   `privileged=yes`, без запуска;
 - dst-nat TCP/443 и TCP/563, для 563 — только из `WhiteList`;
-- правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`;
+- правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`. Порядок
+  mangle `prerouting`: `retain established`, `accept WAN`, mark-routing для
+  установленных соединений с меткой `WARP`, исключения `WhiteList` и `DNS`,
+  `accept Caddy`, маркировка соединений с `veth-warp`, региональная
+  маркировка, mark-routing для новых соединений с меткой `WARP`;
 - scheduler'ы `ADDRESS_LISTS` (раз в сутки), `TOR_NODES` (раз в 6 часов) и
   `ABUSE_LISTS_ON_BOOT` (при загрузке).
 
