@@ -1,0 +1,30 @@
+#!/bin/bash
+set -euo pipefail
+
+# The source image lives in tmpfs.  Never dd an image from the same root disk:
+# the write can destroy future unread input blocks.
+image=/run/chr-stage/chr-image.img
+disk={{ deployment.dd_target_disk }}
+
+settle() {
+  # Bash built-ins only: after dd the old root disk must not be used to load
+  # /usr/bin/sleep or any other executable.
+  local until=$((SECONDS + $1))
+  while (( SECONDS < until )); do :; done
+}
+
+# Freeze Linux writes before replacing its root disk.  The image and script are
+# already resident outside it, in tmpfs and process memory respectively.
+echo u > /proc/sysrq-trigger
+settle 7
+
+# This deliberately mirrors the conservative write pattern proven useful on
+# VPS storage: small blocks, then time for each storage-cache boundary.
+dd if="$image" of="$disk" bs=1024 iflag=fullblock conv=fsync status=progress
+settle 7
+
+# Do not start any further binaries from the disk we just replaced.  SysRq
+# flushes outstanding block writes, then reboots directly from this shell.
+echo s > /proc/sysrq-trigger
+settle 10
+echo b > /proc/sysrq-trigger

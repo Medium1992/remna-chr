@@ -1,0 +1,23 @@
+---
+# Included from a `rescue:` block. Appends one entry to the deployment failure
+# ledger so the play can keep going and report every skipped stage at the end.
+#
+# The failing task may carry `no_log: true`; in that case Ansible censors
+# `ansible_failed_result`, and only the task name is recoverable. That is why
+# every stage passes a human-readable `failed_stage`.
+- name: "Record the failed stage: {{ failed_stage }}"
+  ansible.builtin.set_fact:
+    deploy_failures: >-
+      {{ (deploy_failures | default([])) + [{
+           'stage': failed_stage,
+           'task': (ansible_failed_task.name | default('unknown task')),
+           'error': ((ansible_failed_result.msg
+                      | default(ansible_failed_result | default('no detail; the task was run with no_log')))
+                     | string | truncate(400, true))
+         }] }}
+
+- name: "Continue the deployment after the failed stage: {{ failed_stage }}"
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPED STAGE '{{ failed_stage }}' at task
+      '{{ (deploy_failures | last).task }}': {{ (deploy_failures | last).error }}

@@ -1,0 +1,171 @@
+# Generated for {{ target_ipv4 }}. Do not reuse this file on another VPS.
+:local wanName ""
+:onerror wanLookupError in={
+    :set wanName [/interface ethernet get [find where mac-address="{{ deployment.linux_interface_mac }}"] name]
+} do={
+    :log error ("bootstrap: WAN interface lookup: " . $wanLookupError)
+}
+
+:if ([:len $wanName] = 0) do={
+    :log error "bootstrap: cannot find CHR interface with Ubuntu WAN MAC"
+} else={
+    :onerror dhcpError in={
+        /ip dhcp-client remove [find where interface=$wanName]
+    } do={
+        :log warning ("bootstrap: DHCP client cleanup: " . $dhcpError)
+    }
+    :delay 1s
+
+    :onerror addressCleanupError in={
+        /ip address remove [find where interface=$wanName]
+    } do={
+        :log warning ("bootstrap: old address cleanup: " . $addressCleanupError)
+    }
+    :onerror routeCleanupError in={
+        /ip route remove [find where dst-address=0.0.0.0/0]
+    } do={
+        :log warning ("bootstrap: old default-route cleanup: " . $routeCleanupError)
+    }
+    :onerror addressError in={
+        /ip address add address={{ deployment.routeros_address }} network={{ deployment.routeros_network }} interface=$wanName comment="ansible-bootstrap"
+    } do={
+        :log error ("bootstrap: address configuration: " . $addressError)
+    }
+    :onerror routeError in={
+        /ip route add gateway={{ deployment.gateway }} comment="ansible-bootstrap"
+    } do={
+        :log error ("bootstrap: default route configuration: " . $routeError)
+    }
+}
+
+:onerror dnsError in={
+    /certificate settings set builtin-trust-store=dns,container
+    /ip dns forwarders add doh-servers=https://dns.google/dns-query name=Google
+    /ip dns forwarders add doh-servers=https://cloudflare-dns.com/dns-query name=CloudFlare
+    /ip dns forwarders add dns-servers=9.9.9.9,149.112.112.112 name=Quad9
+    /ip dns forwarders add dns-servers=111.88.96.50,111.88.96.51 name=XBOX
+    /ip dns forwarders add doh-servers=https://xbox-dns.ru/dns-query name=XBOX-DOH
+    /ip dns forwarders add dns-servers=77.88.8.8,77.88.8.1 name=Yandex verify-doh-cert=no
+    /ip dns forwarders add dns-servers=8.8.8.8 name=Google8 verify-doh-cert=no
+    /ip dns set allow-remote-requests=yes cache-max-ttl=1d cache-size=15000KiB doh-max-concurrent-queries=500 doh-max-server-connections=10 servers=8.8.8.8 use-doh-server=https://dns.google/dns-query verify-doh-cert=yes
+    /ip dns static add forward-to=Google8 match-subdomain=yes name=pool.ntp.org type=FWD
+    /ip dns static add address=8.8.8.8 comment="DNS Google" name=dns.google type=A
+    /ip dns static add address=8.8.4.4 comment="DNS Google" name=dns.google type=A
+    /ip dns static add address=104.16.248.249 comment="DNS CloudFlare" name=cloudflare-dns.com type=A
+    /ip dns static add address=104.16.249.249 comment="DNS CloudFlare" name=cloudflare-dns.com type=A
+    /ip dns static add address=9.9.9.9 comment="DNS Quad9" name=dns.quad9.net type=A
+    /ip dns static add address=149.112.112.112 comment="DNS Quad9" name=dns.quad9.net type=A
+    /ip dns static add address=111.88.96.55 comment="XBOX DNS" name=xbox-dns.ru type=A
+} do={
+    :log error ("bootstrap: DNS configuration: " . $dnsError)
+}
+
+:onerror ntpError in={
+    /system clock set time-zone-name=Etc/UTC
+    /system ntp client set enabled=yes
+    /system ntp client servers add address=0.pool.ntp.org
+    /system ntp client servers add address=1.pool.ntp.org
+    /system ntp client servers add address=2.pool.ntp.org
+    /system ntp client servers add address=3.pool.ntp.org
+} do={
+    :log error ("bootstrap: NTP configuration: " . $ntpError)
+}
+
+:onerror adminAccountError in={
+    # Credentials are transported as Base64.  Rendering raw secret text here
+    # lets RouterOS script parsing reinterpret characters such as $, \\, or ?.
+    :local adminPassword [:convert "{{ routeros_admin_password | b64encode }}" from=base64]
+    /user set [find where name="admin"] password=$adminPassword
+} do={
+    :log error ("bootstrap: admin password configuration: " . $adminAccountError)
+}
+
+:onerror restAccountError in={
+    :local restUser [:convert "{{ deployment_rest_user | b64encode }}" from=base64]
+    :local restPassword [:convert "{{ routeros_rest_password | b64encode }}" from=base64]
+    :local existingRestUser [/user find where name=$restUser]
+    :if ([:len $existingRestUser] = 0) do={
+        /user add name=$restUser group=full password=$restPassword comment="Ansible REST automation"
+    } else={
+        /user set $existingRestUser group=full password=$restPassword comment="Ansible REST automation" disabled=no
+    }
+} do={
+    :log error ("bootstrap: REST account configuration: " . $restAccountError)
+}
+
+:onerror serviceError in={
+    /ip service set telnet disabled=yes
+    /ip service set ftp disabled=yes
+    /ip service set www disabled=yes
+    /ip service set ssh disabled=no
+    /ip service set api disabled=yes
+    /ip service set reverse-proxy disabled=yes
+    /ip service set api-ssl disabled=yes
+} do={
+    :log error ("bootstrap: basic service configuration: " . $serviceError)
+}
+
+:onerror caError in={
+    /certificate add name=bootstrap-ca common-name="{{ deployment_identity }} CA" key-usage=key-cert-sign,crl-sign
+    /certificate sign bootstrap-ca
+    /certificate set bootstrap-ca trusted=yes
+} do={
+    :log error ("bootstrap: self-signed CA configuration: " . $caError)
+}
+
+:onerror serverCertificateError in={
+    /certificate add name=bootstrap-rest common-name="{{ deployment_identity }}" key-usage=tls-server
+    /certificate sign bootstrap-rest ca=bootstrap-ca
+    /certificate set bootstrap-rest trusted=yes
+} do={
+    :log error ("bootstrap: REST server certificate configuration: " . $serverCertificateError)
+}
+
+:onerror restServiceError in={
+    /ip service set www-ssl disabled=no certificate=bootstrap-rest tls-version=only-1.2 port={{ deployment_rest_port }}
+} do={
+    :log error ("bootstrap: REST service configuration: " . $restServiceError)
+}
+
+:onerror ipv6Error in={
+    /ipv6 nd set [find default=yes] advertise-dns=yes disabled=yes
+    /ipv6 settings set accept-redirects=no accept-router-advertisements=no accept-router-advertisements-on=none allow-fast-path=no disable-ipv6=yes disable-link-local-address=yes forward=no
+} do={
+    :log error ("bootstrap: IPv6 disable: " . $ipv6Error)
+}
+
+:onerror localAccessError in={
+    /tool bandwidth-server set enabled=no
+    /tool mac-server set allowed-interface-list=none
+    /tool mac-server mac-winbox set allowed-interface-list=none
+    /tool mac-server ping set enabled=no
+    /ip neighbor discovery-settings set discover-interface-list=none
+} do={
+    :log error ("bootstrap: local-access hardening: " . $localAccessError)
+}
+
+:onerror firewallError in={
+    /interface list add name=WAN
+    /interface list member add interface=$wanName list=WAN
+{% for address in management_allowlist.ip_entries %}
+    /ip firewall address-list add list=WhiteList address={{ address }} comment="ansible-managed"
+{% endfor %}
+{% for domain in management_allowlist.domain_entries %}
+    /ip firewall address-list add list=WhiteList address={{ domain }} comment="ansible-managed DNS name"
+{% endfor %}
+    /ip firewall filter add action=accept chain=input connection-state=established,related,untracked comment="ansible: established,related,untracked"
+    /ip firewall filter add action=drop chain=input connection-state=invalid comment="ansible: drop invalid input"
+    /ip firewall filter add action=accept chain=input protocol=icmp comment="ansible: allow ICMP"
+    /ip firewall filter add action=accept chain=input dst-port=22,8291,{{ deployment_rest_port }} protocol=tcp src-address-list=WhiteList comment="ansible: SSH, Winbox and REST from WhiteList"
+    /ip firewall filter add action=add-src-to-address-list chain=input protocol=tcp psd=21,3s,3,1 address-list=PortScanners address-list-timeout=1d comment="ansible: detect TCP port scanners"
+    /ip firewall filter add action=drop chain=input comment="ansible: drop all other input"
+    /ip firewall filter add action=accept chain=forward connection-state=established,related,untracked comment="ansible: established,related,untracked"
+    /ip firewall filter add action=drop chain=forward connection-state=invalid comment="ansible: drop invalid forward"
+    /ip firewall filter add action=drop chain=forward connection-nat-state=!dstnat connection-state=new in-interface-list=WAN comment="ansible: block unsolicited WAN forward"
+    /ip firewall raw add action=drop chain=prerouting src-address-list=PortScanners comment="ansible: drop detected port scanners"
+    /ip firewall nat add action=src-nat chain=srcnat ipsec-policy=out,none out-interface=$wanName to-addresses={{ deployment.routeros_ipv4 }} comment="ansible: WAN source NAT"
+} do={
+    :log error ("bootstrap: firewall configuration: " . $firewallError)
+}
+
+:put "autorun bootstrap complete"

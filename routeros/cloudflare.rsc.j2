@@ -1,0 +1,41 @@
+# RSC fragments use the shared global selector. This script is called only by
+# ADDRESS_LISTS, which executes loaders sequentially.
+:global AddressList "CLOUDFLARE"
+:local resources {
+    "geoipv4/cloudflare";
+}
+
+:local baseUrl "{{ ip_lists_base_url }}"
+
+:foreach resource in=$resources do={
+    :local url "$baseUrl/$resource.rsc"
+    :do {
+        :local r [/tool fetch url=$url mode=https output=user as-value]
+        :if (($r->"status")="finished") do={
+            :local content ($r->"data")
+            :local s [:parse $content]
+            $s
+            :log warning "$resource.rsc loading completed"
+            :put "$resource.rsc loading completed"
+        }
+    } on-error {}
+
+    :local part 1
+    :local continue true
+    :while ($continue) do={
+        :local url "$baseUrl/$resource_part$part.rsc"
+        :do {
+            :local r [/tool fetch url=$url mode=https output=user as-value]
+            :if (($r->"status")="finished") do={
+                :local content ($r->"data")
+                :local s [:parse $content]
+                $s
+                :log warning "$resource.rsc part$part loading completed"
+                :put "$resource.rsc part$part loading completed"
+            }
+            :set part ($part + 1)
+        } on-error={
+            :set continue false
+        }
+    }
+}

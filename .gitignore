@@ -1,0 +1,18 @@
+# Secrets never belong in this repository: pass them as extra variables,
+# a Semaphore Survey or an Ansible Vault file kept out of Git.
+*.pem
+*.key
+id_*
+.vault-pass
+*.vault
+.env
+vars/*.yml
+!vars/*.example.yml
+
+# Ansible runtime files.
+*.retry
+artifacts/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

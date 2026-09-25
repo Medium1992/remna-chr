@@ -1,0 +1,52 @@
+# Example variables for a command-line run.  Copy it to vars/deploy.yml
+# (ignored by Git), fill it in and preferably encrypt it:
+#
+#   ansible-vault encrypt vars/deploy.yml
+#   ansible-playbook playbooks/deploy_chr.yml -e @vars/deploy.yml --ask-vault-pass
+#
+# Every value below is a placeholder.
+
+# Destructive: the target's system disk is overwritten.  Must be exactly YES.
+confirm_dd: "NO"
+
+# The Ubuntu/Debian VPS that becomes a CHR.
+target_ipv4: 203.0.113.10
+target_ssh_user: root
+target_ssh_password: "change-me"
+# target_ssh_private_key: |
+#   -----BEGIN OPENSSH PRIVATE KEY-----
+#   ...
+#   -----END OPENSSH PRIVATE KEY-----
+# target_sudo_password: "change-me"   # only for a non-root SSH user
+
+# RouterOS accounts created on first boot.
+routeros_admin_password: "change-me"
+routeros_rest_user: ansible
+routeros_rest_password: "change-me"
+routeros_rest_port: 8730
+
+# Management access: the public address this playbook runs from, plus any
+# other IPv4 addresses, CIDRs or FQDNs allowed to reach SSH, Winbox and REST.
+controller_egress_cidr: 198.51.100.7/32
+management_allow: ""
+
+# MikroTik account used to renew the CHR license.
+mikrotik_account: "user@example.com"
+mikrotik_password: "change-me"
+chr_license_level: p-unlimited
+
+# Node.
+node_region: EU
+node_domain: node.example.com
+caddy_basicauth_user: admin
+caddy_basicauth_password: "change-me"
+# remnanode_secret_key: ""          # Remnawave node secret, empty for now
+
+# Optional overrides of the sources the playbook uses by default.
+# chr_image_repo: Medium1992/chr-container-rose
+# chr_release_tag: chr-7.24.4-container-rose-advanced
+# chr_asset_name: chr-7.24.4-container-rose.img
+# chr_asset_sha256: c022dc1059701dc078b7d06e04dc4effc0cb7c4f61056b1068b4a23f97247474
+# ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
+# remnanode_image: ghcr.io/medium1992/remnanode-ros
+# caddy_image: ghcr.io/medium1992/caddy-tblocker

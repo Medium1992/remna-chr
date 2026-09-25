@@ -1,0 +1,4 @@
+---
+# The initial RouterOS implementation uses ansible.builtin.uri against the
+# RouterOS REST endpoint. It has no external collection dependencies.
+collections: []

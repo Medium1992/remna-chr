@@ -1,0 +1,706 @@
+---
+- name: Build a one-time target from Semaphore Survey input
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require explicit destructive-operation confirmation
+      ansible.builtin.assert:
+        that:
+          - confirm_dd | default('NO') == 'YES'
+        fail_msg: "Set confirm_dd to exactly YES to authorize disk replacement."
+
+    - name: Validate non-secret Survey fields
+      ansible.builtin.assert:
+        that:
+          - target_ipv4 | default('') is match('^(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)$')
+          - controller_egress_cidr | default('') is match('^(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9][0-9]?)/(?:[0-9]|[12][0-9]|3[0-2])$')
+          - mikrotik_account | default('') | length > 0
+          - (chr_license_level | default('p-unlimited', true)) in ['free', 'p1', 'p10', 'p-unlimited']
+          - (routeros_rest_port | default('8730', true) | int) >= 1
+          - (routeros_rest_port | default('8730', true) | int) <= 65535
+          - (node_region | default('EU', true) | upper) in ['EU', 'RU']
+          - node_domain | default('') is match('^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
+        fail_msg: "Check target IPv4, controller CIDR, MikroTik account, node_region and node_domain."
+
+    - name: Require an SSH password or private key
+      ansible.builtin.assert:
+        that: >-
+          (target_ssh_password | default('') | length > 0)
+          or (target_ssh_private_key | default('') | length > 0)
+        fail_msg: "Provide either target_ssh_password or target_ssh_private_key."
+
+    - name: Validate supplied SSH private-key format
+      ansible.builtin.assert:
+        that: >-
+          target_ssh_private_key | default('') is search(
+            '-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----'
+          )
+        fail_msg: >-
+          target_ssh_private_key must contain the complete private key, not a
+          public key or an OpenSSH certificate.
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Create a temporary SSH private-key file on the Semaphore controller
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .key
+      register: target_ssh_key_file
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Store the supplied SSH private key with owner-only permissions
+      ansible.builtin.copy:
+        content: "{{ target_ssh_private_key }}"
+        dest: "{{ target_ssh_key_file.path }}"
+        mode: '0600'
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Normalize the SSH PEM key supplied through Survey
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import re
+            import sys
+            import textwrap
+            path = sys.argv[1]
+            raw = open(path, encoding="utf-8").read()
+            raw = raw.replace("\\r", "").replace("\\n", "\n")
+            match = re.fullmatch(
+                r"\s*(-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----)\s*"
+                r"(.*?)\s*"
+                r"(-----END (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----)\s*",
+                raw,
+                re.DOTALL,
+            )
+            if not match:
+                raise SystemExit("unrecognised private-key envelope")
+            begin, body, end = match.groups()
+            encoded = re.sub(r"\s+", "", body)
+            if not encoded:
+                raise SystemExit("private key has an empty payload")
+            with open(path, "w", encoding="utf-8", newline="\n") as out:
+                out.write(begin + "\n" + "\n".join(textwrap.wrap(encoded, 64)) + "\n" + end + "\n")
+          - "{{ target_ssh_key_file.path }}"
+      changed_when: false
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Verify that OpenSSH can parse the supplied private key
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -y
+          - -f
+          - "{{ target_ssh_key_file.path }}"
+      changed_when: false
+      register: target_ssh_key_check
+      failed_when: false
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Reject an unparsable SSH private key before connecting
+      ansible.builtin.assert:
+        that: target_ssh_key_check.rc == 0
+        fail_msg: >-
+          target_ssh_private_key could not be parsed by OpenSSH. Provide the
+          complete unencrypted private key, including BEGIN and END lines.
+      when: target_ssh_private_key | default('') | length > 0
+      no_log: true
+
+    - name: Validate RouterOS administrator password
+      ansible.builtin.assert:
+        that:
+          - routeros_admin_password | default('') | length > 0
+          - routeros_admin_password | default('') is not search('["\\r\\n]')
+        fail_msg: "Secret routeros_admin_password is missing or contains a double quote/newline."
+
+    - name: Validate RouterOS REST password
+      ansible.builtin.assert:
+        that:
+          - routeros_rest_password | default('') | length > 0
+          - routeros_rest_password | default('') is not search('["\\r\\n]')
+        fail_msg: "Secret routeros_rest_password is missing or contains a double quote/newline."
+
+    - name: Validate Caddy BasicAuth input
+      ansible.builtin.assert:
+        that:
+          - caddy_basicauth_user | default('') is match('^[A-Za-z0-9_.-]{1,64}$')
+          - caddy_basicauth_password | default('') | length > 0
+          - caddy_basicauth_password | default('') is not search('[\r\n]')
+        fail_msg: >-
+          Set caddy_basicauth_user (letters, digits, dot, underscore or dash)
+          and a single-line secret caddy_basicauth_password.
+      no_log: true
+
+    - name: Generate the bcrypt hash for Caddy BasicAuth without passlib
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import sys
+            import bcrypt
+            password = sys.stdin.buffer.read()
+            if not password:
+                raise SystemExit("password is empty")
+            if len(password) > 72:
+                raise SystemExit(f"password is {len(password)} bytes; bcrypt permits at most 72")
+            print(bcrypt.hashpw(password, bcrypt.gensalt(rounds=14)).decode("ascii"))
+        stdin: "{{ caddy_basicauth_password }}"
+        stdin_add_newline: false
+      register: caddy_bcrypt_result
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require successful direct bcrypt hashing
+      ansible.builtin.assert:
+        that: caddy_bcrypt_result.rc == 0
+        fail_msg: "Caddy password hashing failed: {{ caddy_bcrypt_result.stderr | default('unknown bcrypt error') }}"
+      no_log: true
+
+    - name: Store the Caddy BasicAuth bcrypt result
+      ansible.builtin.set_fact:
+        caddy_basicauth_password_hash: "{{ caddy_bcrypt_result.stdout | trim }}"
+      no_log: true
+
+    - name: Validate MikroTik account password presence
+      ansible.builtin.assert:
+        that:
+          - mikrotik_password | default('') | length > 0
+          - mikrotik_password | default('') is not search('["\\r\\n]')
+        fail_msg: "Secret mikrotik_password is missing or contains a double quote/newline."
+
+    - name: Resolve the management allow-list and controller egress address
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/resolve_management_allowlist.py"
+          - "{{ management_allow | default('') }}"
+          - "{{ controller_egress_cidr }}"
+      changed_when: false
+      register: management_allowlist_result
+
+    - name: Add the one-time Ubuntu VPS target
+      ansible.builtin.add_host:
+        name: deployment_target
+        groups: chr_deployment_target
+        # Survey text fields can carry a trailing newline; OpenSSH rejects it
+        # in a host name even though the IPv4 validation accepts it.
+        ansible_host: "{{ target_ipv4 | trim }}"
+        ansible_user: "{{ target_ssh_user | default('root', true) | trim }}"
+        ansible_password: "{{ target_ssh_password | default(omit, true) }}"
+        ansible_ssh_private_key_file: "{{ target_ssh_key_file.path | default(omit) }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
+        # Avoid an implicit /root/.ansible/tmp when SSH uses a non-root user
+        # and privileged tasks execute through sudo.
+        ansible_remote_tmp: "/tmp/.ansible-{{ target_ssh_user | default('root', true) | trim }}"
+        ansible_become: "{{ (target_ssh_user | default('root', true)) != 'root' }}"
+        ansible_become_method: sudo
+        ansible_become_user: root
+        ansible_become_password: "{{ target_sudo_password | default(omit, true) }}"
+        management_allowlist: "{{ management_allowlist_result.stdout | from_json }}"
+        deployment_rest_user: "{{ routeros_rest_user | default('ansible', true) }}"
+        deployment_rest_port: "{{ routeros_rest_port | default('8730', true) }}"
+        deployment_identity: "{{ routeros_identity | default('chr-' ~ target_ipv4, true) }}"
+        deployment_caddy_basicauth_user: "{{ caddy_basicauth_user }}"
+        deployment_caddy_basicauth_password_hash: "{{ caddy_basicauth_password_hash }}"
+      no_log: true
+
+- name: Prepare the Ubuntu VPS, inject autorun and replace its root disk
+  hosts: chr_deployment_target
+  gather_facts: true
+  # For non-root SSH users, host variables above execute every privileged task
+  # directly through sudo.  Do not use a shell-level `sudo su`.
+  vars:
+    # Images come from the public chr-container-rose releases.  Version and
+    # SHA-256 stay pinned here on purpose: a forced rebuild upstream changes
+    # the checksum, and the deployment then stops before touching the disk
+    # until the pin is updated deliberately.
+    chr_image_repo: Medium1992/chr-container-rose
+    chr_release_tag: chr-7.24.4-container-rose-advanced
+    chr_asset_name: chr-7.24.4-container-rose.img
+    chr_asset_sha256: c022dc1059701dc078b7d06e04dc4effc0cb7c4f61056b1068b4a23f97247474
+  tasks:
+    - name: Require a Debian-family target
+      ansible.builtin.assert:
+        that: ansible_facts['os_family'] == 'Debian'
+        fail_msg: "This deployment workflow currently supports Ubuntu/Debian only."
+
+    - name: Install CHR image preparation prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - coreutils
+          - curl
+          - iproute2
+          - python3
+          - util-linux
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Derive safe disk and RouterOS addressing parameters
+      ansible.builtin.script: ../scripts/chr_preflight.py
+      changed_when: false
+      register: chr_preflight
+
+    - name: Store preflight result for templates and final status
+      ansible.builtin.set_fact:
+        deployment: "{{ chr_preflight.stdout | from_json }}"
+
+    - name: Download the pinned CHR raw image to the target VPS
+      ansible.builtin.get_url:
+        url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}"
+        dest: /var/tmp/chr-image.img
+        mode: '0600'
+        force: true
+      register: chr_image_download
+      until: chr_image_download is succeeded
+      retries: 3
+      delay: 10
+
+    - name: Calculate image checksum and size
+      ansible.builtin.stat:
+        path: /var/tmp/chr-image.img
+        checksum_algorithm: sha256
+      register: chr_image_stat
+
+    - name: Verify the downloaded CHR image before touching the disk
+      ansible.builtin.assert:
+        that:
+          - chr_image_stat.stat.checksum == chr_asset_sha256
+          - chr_image_stat.stat.size < deployment.dd_target_disk_size_bytes
+        fail_msg: "CHR image checksum or target disk size validation failed."
+
+    # The downloaded image is on the same root disk that will be overwritten.
+    # Reading it directly while dd writes that disk can overwrite unread image
+    # blocks and produce an intermittent, corrupt CHR boot image.  Stage the
+    # final mutable image entirely in RAM first.
+    - name: Require enough available RAM for safe CHR image staging
+      ansible.builtin.shell: |
+        set -euo pipefail
+        available_bytes=$(awk '/MemAvailable:/ { print $2 * 1024; exit }' /proc/meminfo)
+        required_bytes=$(( {{ chr_image_stat.stat.size }} + 100 * 1024 * 1024 ))
+        test "$available_bytes" -ge "$required_bytes"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: chr_ram_preflight
+
+    - name: Stop when the VPS cannot stage CHR safely in RAM
+      ansible.builtin.assert:
+        that: chr_ram_preflight.rc == 0
+        fail_msg: >-
+          The VPS has insufficient available RAM to stage the CHR image safely.
+          This deployment refuses to dd an image stored on the target disk.
+
+    - name: Copy the verified CHR image into a private tmpfs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        stage_dir=/run/chr-stage
+        image_bytes={{ chr_image_stat.stat.size }}
+        tmpfs_bytes=$((image_bytes + 100 * 1024 * 1024))
+        install -d -m 0700 "$stage_dir"
+        if mountpoint -q "$stage_dir"; then umount "$stage_dir"; fi
+        mount -t tmpfs -o "size=${tmpfs_bytes},mode=0700" tmpfs "$stage_dir"
+        cp --reflink=never --sparse=never /var/tmp/chr-image.img "$stage_dir/chr-image.img"
+        chmod 0600 "$stage_dir/chr-image.img"
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Verify the RAM-staged CHR image checksum
+      ansible.builtin.stat:
+        path: /run/chr-stage/chr-image.img
+        checksum_algorithm: sha256
+      register: chr_ram_image_stat
+
+    - name: Refuse an incomplete RAM-staged CHR image
+      ansible.builtin.assert:
+        that:
+          - chr_ram_image_stat.stat.checksum == chr_asset_sha256
+          - chr_ram_image_stat.stat.size == chr_image_stat.stat.size
+        fail_msg: "RAM staging changed or truncated the verified CHR image."
+
+    - name: Render the per-VPS RouterOS bootstrap script
+      ansible.builtin.template:
+        src: ../templates/autorun.scr.j2
+        dest: /var/tmp/autorun.scr
+        mode: '0600'
+      no_log: true
+
+    - name: Inject autorun into the RouterOS writable image partition
+      ansible.builtin.shell: |
+        set -euo pipefail
+        loop_device=""
+        mount_dir=$(mktemp -d /var/tmp/chr-rw.XXXXXX)
+        cleanup() {
+          if mountpoint -q "$mount_dir"; then umount "$mount_dir"; fi
+          if [ -n "$loop_device" ]; then losetup -d "$loop_device"; fi
+          rmdir "$mount_dir"
+        }
+        trap cleanup EXIT
+        loop_device=$(losetup --find --show --partscan /run/chr-stage/chr-image.img)
+        mount "${loop_device}p2" "$mount_dir"
+        install -m 0600 /var/tmp/autorun.scr "$mount_dir/rw/autorun.scr"
+        sync
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Render the irreversible replacement command
+      ansible.builtin.template:
+        src: ../templates/replace_with_chr.sh.j2
+        dest: /var/tmp/replace-with-chr.sh
+        mode: '0700'
+
+    - name: Start the disk replacement and intentionally lose SSH
+      ansible.builtin.shell: |
+        nohup /bin/bash /var/tmp/replace-with-chr.sh \
+          >/var/tmp/replace-with-chr.log 2>&1 </dev/null &
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: Wait for CHR REST HTTPS and activate the requested license tier
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    routeros_rest_base_url: "https://{{ target_ipv4 }}:{{ routeros_rest_port | default('8730', true) }}/rest"
+  # Every RouterOS REST call below shares the same endpoint credentials.  The
+  # `password` argument is declared no_log inside the uri module itself, so it
+  # stays censored in failure output without hiding the whole task result.
+  module_defaults:
+    ansible.builtin.uri:
+      user: "{{ routeros_rest_user | default('ansible', true) }}"
+      password: "{{ routeros_rest_password }}"
+      force_basic_auth: true
+      validate_certs: false
+  tasks:
+    # This wait stays fatal on purpose: with no reachable REST endpoint every
+    # later stage would fail anyway, and the CHR itself needs investigating.
+    - name: Wait for the freshly installed CHR REST endpoint
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/system/resource"
+        method: GET
+        status_code: 200
+        return_content: false
+      register: rest_probe
+      until: rest_probe.status | default(0) == 200
+      retries: 120
+      delay: 5
+
+    - name: Activate the requested CHR license tier
+      block:
+        - name: Request or renew the CHR license level
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/execute"
+            method: POST
+            body_format: json
+            body:
+              # Rendering the raw credentials into RouterOS script text lets its
+              # parser reinterpret characters such as $, backslash, ; or ?.  Transport
+              # them as Base64 exactly like autorun.scr does.  `level` is safe:
+              # the Survey validation only accepts four fixed words.
+              script: |
+                :local licenseAccount [:convert "{{ mikrotik_account | b64encode }}" from=base64]
+                :local licensePassword [:convert "{{ mikrotik_password | b64encode }}" from=base64]
+                /system license renew account=$licenseAccount password=$licensePassword level={{ chr_license_level | default('p-unlimited', true) }}
+            status_code: 200
+          no_log: true
+
+        - name: Confirm the CHR license status
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/license"
+            method: GET
+            status_code: 200
+          register: license_status
+      rescue:
+        - name: Record the license stage failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: CHR license activation
+
+- name: Apply the verified RouterOS post-bootstrap configuration through REST
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # Once the CHR answers on REST the deployment never aborts half way.  Each
+  # stage below is a block whose rescue records the failure in `deploy_failures`
+  # and lets the remaining stages run.  The last two tasks report every skipped
+  # stage and, unless `fail_on_skipped_stages` is false, still mark the run
+  # failed so Semaphore does not show a green deployment with holes in it.
+  vars:
+    routeros_rest_base_url: "https://{{ target_ipv4 }}:{{ routeros_rest_port | default('8730', true) }}/rest"
+    routeros_script_policy: ftp,reboot,read,write,policy,test,password,sniff,sensitive,romon
+    # Sources a fork may want to point at its own builds.  All of them can
+    # be overridden as extra variables, like any Survey field.
+    ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
+    remnanode_image: ghcr.io/medium1992/remnanode-ros
+    caddy_image: ghcr.io/medium1992/caddy-tblocker
+    routeros_scripts:
+      - name: SKIPA_CIDR
+        source: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../routeros/skipa_cidr.rsc') }}"
+      - name: LIST_RU
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/list_ru.rsc.j2') }}"
+      - name: CLOUDFLARE
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/cloudflare.rsc.j2') }}"
+      - name: GEO_IP_DETECT
+        source: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../routeros/geo_ip_detect.rsc') }}"
+      - name: ABUSE_CINS
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/abuse_cins.rsc.j2') }}"
+      - name: ABUSE_SPAMHAUS
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/abuse_spamhaus.rsc.j2') }}"
+      - name: TOR_NODES
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/tor_nodes.rsc.j2') }}"
+      - name: ADDRESS_LISTS
+        source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/address_lists_refresh.rsc.j2') }}"
+  module_defaults:
+    ansible.builtin.uri:
+      user: "{{ routeros_rest_user | default('ansible', true) }}"
+      password: "{{ routeros_rest_password }}"
+      force_basic_auth: true
+      validate_certs: false
+  tasks:
+    - name: Install the managed RouterOS system scripts
+      block:
+        - name: Read existing RouterOS system scripts
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/script"
+            method: GET
+            status_code: 200
+          register: routeros_existing_scripts
+
+        - name: Index existing RouterOS scripts by name
+          ansible.builtin.set_fact:
+            routeros_existing_script_ids: >-
+              {{ routeros_existing_script_ids | default({})
+              | combine({item.name: item['.id']}) }}
+          loop: "{{ routeros_existing_scripts.json | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Update managed RouterOS scripts that already exist
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/script/{{ routeros_existing_script_ids[item.name] }}"
+            method: PATCH
+            body_format: json
+            body:
+              source: "{{ item.source }}"
+              policy: "{{ routeros_script_policy }}"
+              dont-require-permissions: 'false'
+            status_code: 200
+          loop: "{{ routeros_scripts }}"
+          when: item.name in (routeros_existing_script_ids | default({}))
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Create missing managed RouterOS scripts
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/script/add"
+            method: POST
+            body_format: json
+            body:
+              name: "{{ item.name }}"
+              source: "{{ item.source }}"
+              policy: "{{ routeros_script_policy }}"
+              dont-require-permissions: 'false'
+            status_code: 200
+          loop: "{{ routeros_scripts }}"
+          when: item.name not in (routeros_existing_script_ids | default({}))
+          loop_control:
+            label: "{{ item.name }}"
+      rescue:
+        - name: Record the system-script stage failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: RouterOS system scripts
+
+    # autorun.scr finds the WAN port by the MAC of the original Ubuntu NIC
+    # because the CHR name is not guaranteed to be ether1.  The REST stage must
+    # use the very same interface, so it resolves the name the same way.
+    - name: Resolve the CHR WAN interface name
+      vars:
+        wan_interface_mac: "{{ hostvars['deployment_target'].deployment.linux_interface_mac | upper }}"
+      block:
+        - name: Read the CHR ethernet interfaces
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/interface/ethernet"
+            method: GET
+            status_code: 200
+          register: chr_ethernet_interfaces
+
+        - name: Select the ethernet interface carrying the original VPS MAC
+          ansible.builtin.set_fact:
+            wan_interface_matched: >-
+              {{ (chr_ethernet_interfaces.json | default([])
+                  | selectattr('mac-address', 'defined')
+                  | selectattr('mac-address', 'equalto', wan_interface_mac)
+                  | map(attribute='name') | list | first)
+                 | default('', true) }}
+
+        # Without this the silent `ether1` fallback would be indistinguishable
+        # in the log from a genuine MAC match.  Failing here hands the case to
+        # the rescue below, which falls back and records the stage as skipped.
+        - name: Require the original VPS MAC on a CHR ethernet port
+          ansible.builtin.assert:
+            that: wan_interface_matched | length > 0
+            fail_msg: >-
+              No CHR ethernet port carries the original VPS MAC
+              {{ wan_interface_mac }}; the ports are
+              {{ chr_ethernet_interfaces.json | default([]) | map(attribute='name') | list }}.
+            quiet: true
+
+        - name: Store the resolved WAN interface name
+          ansible.builtin.set_fact:
+            wan_interface_name: "{{ wan_interface_matched }}"
+
+        - name: Report the resolved WAN interface
+          ansible.builtin.debug:
+            msg: "CHR WAN interface: {{ wan_interface_name }} (matched by the original VPS MAC {{ wan_interface_mac }})"
+      rescue:
+        - name: Fall back to ether1 after a failed lookup
+          ansible.builtin.set_fact:
+            wan_interface_name: ether1
+
+        - name: Record the WAN interface lookup failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: CHR WAN interface lookup (fell back to ether1)
+
+    - name: Configure Cloudflare WARP through direct REST resources
+      ansible.builtin.include_tasks: tasks/configure_warp_rest.yml
+
+    - name: Configure containers and packet policy through direct REST resources
+      ansible.builtin.include_tasks: tasks/configure_static_rest.yml
+
+    - name: Create the daily address-list scheduler
+      block:
+        - name: Create the serialized address-list scheduler through REST
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/scheduler/add"
+            method: POST
+            body_format: json
+            body:
+              name: ADDRESS_LISTS
+              interval: 1d
+              start-date: '2026-03-30'
+              start-time: '06:00:00'
+              on-event: /system/script/run ADDRESS_LISTS
+              policy: "{{ routeros_script_policy }}"
+            status_code: 200
+      rescue:
+        - name: Record the daily scheduler failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: Daily ADDRESS_LISTS scheduler
+
+    - name: Create the boot-time abuse-list scheduler
+      block:
+        - name: Restore dynamic abuse lists shortly after every CHR boot
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/scheduler/add"
+            method: POST
+            body_format: json
+            body:
+              name: ABUSE_LISTS_ON_BOOT
+              interval: 0s
+              start-time: startup
+              on-event: |
+                :delay 20s
+                :do {
+                    /system/script/run ABUSE_CINS
+                } on-error={
+                    :error "ABUSE_CINS boot refresh failed"
+                }
+                :delay 1s
+                :do {
+                    /system/script/run ABUSE_SPAMHAUS
+                } on-error={
+                    :error "ABUSE_SPAMHAUS boot refresh failed"
+                }
+                :delay 1s
+                :do {
+                    /system/script/run TOR_NODES
+                } on-error={
+                    :error "TOR_NODES boot refresh failed"
+                }
+              policy: "{{ routeros_script_policy }}"
+            status_code: 200
+      rescue:
+        - name: Record the boot scheduler failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: ABUSE_LISTS_ON_BOOT scheduler
+
+    - name: Create the Tor relay list scheduler
+      block:
+        # Kept out of the ADDRESS_LISTS chain and offset from its 06:00 slot:
+        # the Tor consensus turns over far faster than the other feeds, and the
+        # two must not fight over the shared `:global AddressList` selector.
+        - name: Create the six-hour Tor relay refresh scheduler through REST
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/scheduler/add"
+            method: POST
+            body_format: json
+            body:
+              name: TOR_NODES
+              interval: 6h
+              start-date: '2026-03-30'
+              start-time: '03:40:00'
+              on-event: /system/script/run TOR_NODES
+              policy: "{{ routeros_script_policy }}"
+            status_code: 200
+      rescue:
+        - name: Record the Tor scheduler failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: TOR_NODES scheduler
+
+    - name: Start the first address-list refresh
+      block:
+        - name: Start the initial serialized list refresh
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/execute"
+            method: POST
+            body_format: json
+            body:
+              script: "/system/script/run ADDRESS_LISTS"
+            status_code: 200
+          register: address_lists_initial_job
+      rescue:
+        - name: Record the initial list refresh failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: Initial ADDRESS_LISTS run
+
+    - name: Report the CHR deployment result
+      ansible.builtin.debug:
+        msg:
+          target: "{{ target_ipv4 }}"
+          rest_url: "{{ routeros_rest_base_url }}"
+          node_region: "{{ node_region | default('EU', true) | upper }}"
+          node_domain: "{{ node_domain }}"
+          containers: "prepared and pulled; intentionally not started"
+          address_lists_job: "{{ address_lists_initial_job.json.ret | default('not started') }}"
+          skipped_stages: "{{ deploy_failures | default([]) | map(attribute='stage') | list }}"
+          failures: "{{ deploy_failures | default([]) }}"
+
+    - name: Mark the run failed when stages were skipped
+      ansible.builtin.fail:
+        msg: >-
+          CHR is up and every remaining stage was applied, but
+          {{ deploy_failures | length }} stage(s) were skipped:
+          {{ deploy_failures | map(attribute='stage') | join(', ') }}.
+          Fix and re-apply those stages, or set fail_on_skipped_stages=false to
+          accept the result.
+      when:
+        - deploy_failures | default([]) | length > 0
+        - fail_on_skipped_stages | default(true) | bool

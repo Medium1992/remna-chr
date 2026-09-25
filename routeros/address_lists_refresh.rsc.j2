@@ -1,0 +1,44 @@
+# Upload this as the RouterOS system script ADDRESS_LISTS. It is deliberately
+# the only scheduled entry point, so long imports cannot overlap.
+:local region "{{ node_region | upper }}"
+:if (($region != "EU") && ($region != "RU")) do={ :error "node_region must be EU or RU" }
+
+:do {
+    /system/script/run SKIPA_CIDR
+} on-error={
+    :error "SKIPA_CIDR failed; refresh chain stopped"
+}
+
+:if ($region = "EU") do={
+    :delay 1s
+    :do {
+        /system/script/run LIST_RU
+    } on-error={
+        :error "LIST_RU failed; refresh chain stopped"
+    }
+    :delay 1s
+    :do {
+        /system/script/run CLOUDFLARE
+    } on-error={
+        :error "CLOUDFLARE failed; refresh chain stopped"
+    }
+    :delay 1s
+    :do {
+        /system/script/run GEO_IP_DETECT
+    } on-error={
+        :error "GEO_IP_DETECT failed; refresh chain stopped"
+    }
+}
+
+:delay 1s
+:do {
+    /system/script/run ABUSE_CINS
+} on-error={
+    :error "ABUSE_CINS failed; refresh chain stopped"
+}
+:delay 1s
+:do {
+    /system/script/run ABUSE_SPAMHAUS
+} on-error={
+    :error "ABUSE_SPAMHAUS failed; refresh chain stopped"
+}

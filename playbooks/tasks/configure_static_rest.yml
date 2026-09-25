@@ -1,0 +1,388 @@
+---
+# Static RouterOS configuration.  Each mutation below targets a REST resource;
+# /system script is reserved for address-list loaders only.
+#
+# RouterOS credentials, force_basic_auth and validate_certs come from the
+# play-level `module_defaults` for ansible.builtin.uri.
+#
+# Every stage is a block whose rescue records the failure in `deploy_failures`
+# and lets the remaining stages run: after the CHR is up, a single broken step
+# must not leave the node half configured with no report of what is missing.
+- name: Locate the bootstrap input drop rule
+  block:
+    - name: Read bootstrap input rules
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/filter"
+        method: GET
+        status_code: 200
+      register: bootstrap_filters
+
+    - name: Locate bootstrap input drop rule
+      ansible.builtin.set_fact:
+        bootstrap_input_drop: >-
+          {{ bootstrap_filters.json | selectattr('comment', 'equalto', 'ansible: drop all other input') | first }}
+  rescue:
+    - name: Record the missing bootstrap drop rule and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Bootstrap input drop rule lookup
+
+- name: Create the container network
+  block:
+    - name: Create container network resources through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/{{ item.endpoint }}/add"
+        method: POST
+        body_format: json
+        body: "{{ item.body }}"
+        status_code: 200
+      loop:
+        - endpoint: interface/veth
+          body: {name: caddy, address: 192.168.243.2/28, gateway: 192.168.243.1}
+        - endpoint: interface/veth
+          body: {name: remna-node, address: 192.168.243.3/28, gateway: 192.168.243.1}
+        - endpoint: interface/bridge
+          body: {name: Remna}
+        - endpoint: interface/bridge/port
+          body: {bridge: Remna, interface: remna-node}
+        - endpoint: interface/bridge/port
+          body: {bridge: Remna, interface: caddy}
+        - endpoint: ip/address
+          body: {address: 192.168.243.1/28, interface: Remna, network: 192.168.243.0, comment: remna-container-network}
+      loop_control:
+        label: "{{ item.endpoint }}"
+  rescue:
+    - name: Record the container network failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Container network (veth, bridge, address)
+
+- name: Create the container directories and the Caddyfile
+  block:
+    - name: Create container directories and Caddyfile through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/file/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {name: temp, type: directory}
+        - {name: caddy_conf, type: directory}
+        - {name: Containers, type: directory}
+        - name: caddy_conf/Caddyfile
+          type: file
+          contents: |
+            {
+              servers :443 {
+                listener_wrappers {
+                  proxy_protocol {
+                    allow 192.168.243.0/28
+                  }
+                  tls
+                }
+              }
+            }
+            https://{{ node_domain }} {
+              basicauth {
+                {{ caddy_basicauth_user }} {{ caddy_basicauth_password_hash }}
+              }
+            }
+      # The last item carries the BasicAuth hash.
+      no_log: true
+  rescue:
+    - name: Record the Caddyfile failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Container directories and Caddyfile
+
+- name: Configure the container service
+  block:
+    - name: Configure container service resources through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/{{ item.endpoint }}"
+        method: "{{ item.method | default('POST') }}"
+        body_format: json
+        body: "{{ item.body }}"
+        status_code: 200
+      loop:
+        # /container/config is a singleton menu without a REST object ID; RouterOS
+        # exposes its update operation as the JSON command endpoint below.
+        - endpoint: container/config/set
+          method: POST
+          body: {registry-url: https://registry-1.docker.io, tmpdir: /temp}
+        - endpoint: container/mounts/add
+          body: {list: caddy, src: /caddy_conf, dst: /etc/caddy}
+        - endpoint: container/envs/add
+          body: {list: remnanode, key: NODE_PORT, value: '563'}
+        - endpoint: container/envs/add
+          body: {list: remnanode, key: SECRET_KEY, value: "{{ remnanode_secret_key | default('', true) }}"}
+      loop_control:
+        label: "{{ item.endpoint }}"
+      # The last item carries the Remnawave node secret.
+      no_log: true
+  rescue:
+    - name: Record the container service failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Container config, mounts and envs
+
+- name: Allow container DNS through the input chain
+  when: bootstrap_input_drop is defined
+  block:
+    - name: Add container DNS access before bootstrap input drop
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/filter/add"
+        method: POST
+        body_format: json
+        body:
+          chain: input
+          action: accept
+          protocol: "{{ item.protocol }}"
+          dst-port: '53'
+          in-interface: Remna
+          comment: "remna: DNS {{ item.protocol | upper }}"
+          place-before: "{{ bootstrap_input_drop['.id'] }}"
+        status_code: 200
+      loop:
+        - {protocol: udp}
+        - {protocol: tcp}
+      loop_control:
+        label: "{{ item.protocol }}"
+  rescue:
+    - name: Record the container DNS rule failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Container DNS input rules
+
+- name: Publish the Remna ports
+  block:
+    - name: Add published Remna ports through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/nat/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        # `wan_interface_name` is resolved from the original VPS MAC by the play,
+        # exactly like autorun.scr does; ether1 is only its fallback.
+        - {chain: dstnat, action: dst-nat, protocol: tcp, in-interface: "{{ wan_interface_name | default('ether1', true) }}", dst-port: '443', to-addresses: 192.168.243.3, comment: 'remna: public HTTPS to node'}
+        - {chain: dstnat, action: dst-nat, protocol: tcp, in-interface: "{{ wan_interface_name | default('ether1', true) }}", dst-port: '563', src-address-list: WhiteList, to-addresses: 192.168.243.3, comment: 'remna: WhiteList node port 563'}
+      loop_control:
+        label: "{{ item.comment }}"
+  rescue:
+    - name: Record the published-port failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Published Remna dst-nat ports
+
+- name: Pull the container images
+  block:
+    - name: Pull Remna Node and Caddy without starting them
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/container/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {name: remna-node, interface: remna-node, remote-image: "{{ remnanode_image }}", root-dir: /Containers/remna-node, hostname: remna-node, domain-name: remna-node, dns: 192.168.243.1, envlists: remnanode, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true'}
+        - {name: caddy, interface: caddy, remote-image: "{{ caddy_image }}", root-dir: /Containers/caddy, hostname: caddy, domain-name: caddy, dns: 192.168.243.1, mountlists: caddy, restart-policy: on-failure, restart-interval: 30s, start-on-boot: 'true'}
+      loop_control:
+        label: "{{ item.name }}"
+  rescue:
+    - name: Record the container pull failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Container image pull
+
+- name: Add the static address lists
+  block:
+    - name: Add static Remna address lists through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/address-list/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        # Cloudflare resolvers (1.1.1.1 and the cloudflare-dns.com addresses) are
+        # deliberately absent: they geolocate the querying node, so they must be
+        # left to the CLOUDFLARE mangle rule and go out through WARP instead of
+        # being exempted as direct DNS.
+        - {address: 9.9.9.9, list: DNS, comment: 'remna: DNS resolver'}
+        - {address: 149.112.112.112, list: DNS, comment: 'remna: DNS resolver'}
+        - {address: 8.8.8.8, list: DNS, comment: 'remna: DNS resolver'}
+        - {address: 8.8.4.4, list: DNS, comment: 'remna: DNS resolver'}
+        - {address: st.max.ru, list: MAX, comment: 'remna: MAX'}
+        - {address: 130.49.152.0/24, list: Telega, comment: 'remna: Telega'}
+      loop_control:
+        label: "{{ item.list }} {{ item.address }}"
+  rescue:
+    - name: Record the static address-list failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Static DNS, MAX and Telega address lists
+
+- name: Apply the mangle policy
+  block:
+    - name: Add common Remna mangle rules through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {action: change-mss, chain: postrouting, new-mss: clamp-to-pmtu, protocol: tcp, tcp-flags: syn, comment: 'remna: clamp TCP MSS'}
+      loop_control:
+        label: "{{ item.comment }}"
+
+    - name: Retain established unmarked connections before all other prerouting rules
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: accept
+          chain: prerouting
+          connection-mark: no-mark
+          connection-state: "established,related,untracked"
+          comment: 'remna: retain established routing'
+        status_code: 200
+
+    - name: Apply existing WARP connection routing mark before Remna exemptions
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: mark-routing
+          chain: prerouting
+          connection-mark: WARP
+          in-interface: Remna
+          new-routing-mark: wg-warp
+          passthrough: 'false'
+          comment: 'remna: route existing WARP connections'
+        status_code: 200
+
+    - name: Add WhiteList and DNS mangle exemptions through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {action: accept, chain: prerouting, dst-address-list: WhiteList, in-interface: Remna, comment: 'remna: direct WhiteList'}
+        - {action: accept, chain: prerouting, dst-address-list: DNS, in-interface: Remna, comment: 'remna: direct DNS'}
+      loop_control:
+        label: "{{ item.comment }}"
+
+    - name: Accept traffic arriving from WAN in mangle
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: {action: accept, chain: prerouting, in-interface-list: WAN, comment: 'remna: accept WAN'}
+        status_code: 200
+
+    - name: Keep Caddy certificate traffic outside WARP policy routing
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: accept
+          chain: prerouting
+          src-address: 192.168.243.2
+          comment: 'remna: accept Caddy'
+        status_code: 200
+
+    - name: Add EU WARP mangle rules through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {action: mark-connection, chain: prerouting, connection-mark: no-mark, connection-state: new, dst-address-list: GEO_IP_DETECT, in-interface: Remna, new-connection-mark: WARP, comment: 'remna: EU WARP geo checks'}
+        - {action: mark-connection, chain: prerouting, connection-mark: no-mark, connection-state: new, dst-address-list: LIST_RU, in-interface: Remna, new-connection-mark: WARP, comment: 'remna: EU WARP RU'}
+        - {action: mark-connection, chain: prerouting, connection-mark: no-mark, connection-state: new, dst-address-list: CLOUDFLARE, in-interface: Remna, new-connection-mark: WARP, comment: 'remna: EU WARP Cloudflare'}
+      loop_control:
+        label: "{{ item.comment }}"
+      when: (node_region | default('EU', true) | upper) == 'EU'
+
+    - name: Add RU WARP mangle rule through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: mark-connection
+          chain: prerouting
+          connection-mark: no-mark
+          connection-state: new
+          dst-address-type: '!local'
+          src-address-type: '!local'
+          in-interface: Remna
+          new-connection-mark: WARP
+          comment: 'remna: RU WARP all Remna egress'
+        status_code: 200
+      when: (node_region | default('EU', true) | upper) == 'RU'
+
+    - name: Add WARP routing mark through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body: {action: mark-routing, chain: prerouting, connection-mark: WARP, in-interface: Remna, new-routing-mark: wg-warp, passthrough: 'false', comment: 'remna: send marked traffic to WARP'}
+        status_code: 200
+  rescue:
+    - name: Record the mangle policy failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Mangle policy routing
+
+- name: Apply the raw blocks
+  block:
+    - name: Add Remna raw block rules through REST
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/raw/add"
+        method: POST
+        body_format: json
+        body: "{{ item }}"
+        status_code: 200
+      loop:
+        - {action: drop, chain: prerouting, src-address-list: SKIPA_CIDR, comment: 'remna: block source SKIPA'}
+        - {action: drop, chain: prerouting, dst-address-list: SKIPA_CIDR, comment: 'remna: block destination SKIPA'}
+        - {action: drop, chain: prerouting, dst-address-list: MAX, comment: 'remna: block MAX'}
+        - {action: drop, chain: prerouting, dst-address-list: Telega, comment: 'remna: block Telegram'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: ABUSE_CINS, comment: 'remna: block CINS destinations'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: ABUSE_CINS_NEXT, comment: 'remna: block CINS destinations next'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: ABUSE_SPAMHAUS, comment: 'remna: block Spamhaus destinations'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: ABUSE_SPAMHAUS_NEXT, comment: 'remna: block Spamhaus destinations next'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: TOR_NODES, comment: 'remna: block Tor relays'}
+        - {action: drop, chain: prerouting, in-interface: Remna, dst-address-list: TOR_NODES_NEXT, comment: 'remna: block Tor relays next'}
+      loop_control:
+        label: "{{ item.comment }}"
+
+    - name: Add SMTP raw block through explicit REST JSON
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/raw/add"
+        method: POST
+        body_format: json
+        body:
+          action: drop
+          chain: prerouting
+          protocol: tcp
+          dst-port: "25,465,587"
+          comment: 'remna: block SMTP'
+        status_code: 200
+  rescue:
+    - name: Record the raw block failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Raw drop rules (SKIPA, abuse lists, SMTP)

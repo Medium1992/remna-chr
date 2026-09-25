@@ -1,0 +1,53 @@
+# Two permanent raw rules match these lists.  Load the smaller (normally empty)
+# one, then clear the previous list only after manifest validation succeeds.
+:local listA "ABUSE_SPAMHAUS"
+:local listB "ABUSE_SPAMHAUS_NEXT"
+:local countA [:len [/ip/firewall/address-list/find where list=$listA]]
+:local countB [:len [/ip/firewall/address-list/find where list=$listB]]
+:local staging $listA
+:local previous $listB
+:if ($countA >= $countB) do={
+    :set staging $listB
+    :set previous $listA
+}
+
+:local baseUrl "{{ ip_lists_base_url }}/abusev4"
+:local fetchData do={
+    :local r [/tool/fetch url=$1 mode=https output=user as-value]
+    :if (($r->"status") != "finished") do={ :error ("Spamhaus fetch failed: " . $1) }
+    :return ($r->"data")
+}
+
+# Raw GitHub manifest files end in LF/CRLF.  RouterOS :tonum does not
+# consistently trim those terminators, so retain only leading digits.
+:local manifestNumber do={
+    :local text $1
+    :local digits ""
+    :for i from=0 to=([:len $text] - 1) do={
+        :local char [:pick $text $i ($i + 1)]
+        :if ([:find "0123456789" $char] != nil) do={
+            :set digits ($digits . $char)
+        } else={
+            :break
+        }
+    }
+    :return [:deserialize $digits from=json]
+}
+
+:local expectedParts [$manifestNumber [$fetchData ($baseUrl . "/spamhaus-drop.parts")]]
+:local expectedEntries [$manifestNumber [$fetchData ($baseUrl . "/spamhaus-drop.entries")]]
+:if (($expectedParts < 1) || ($expectedEntries < 1)) do={ :error "Spamhaus manifest is invalid" }
+
+/ip/firewall/address-list/remove [find where list=$staging]
+:global AddressList $staging
+:for part from=1 to=$expectedParts do={
+    :local content [$fetchData ($baseUrl . "/spamhaus-drop_part" . $part . ".rsc")]
+    :local parsed [:parse $content]
+    $parsed
+}
+
+:local loaded [:len [/ip/firewall/address-list/find where list=$staging]]
+:if ($loaded != $expectedEntries) do={ :error ("Spamhaus count mismatch: expected=" . $expectedEntries . " loaded=" . $loaded) }
+
+/ip/firewall/address-list/remove [find where list=$previous]
+:log warning "Spamhaus refresh complete"

@@ -1,0 +1,205 @@
+---
+# This task contains no RouterOS CLI. Every RouterOS mutation goes through its
+# REST resource endpoints; Cloudflare registration is made by Ansible itself.
+#
+# The RouterOS credentials, force_basic_auth and validate_certs come from the
+# play-level `module_defaults` for ansible.builtin.uri.  The single call that
+# leaves this CHR - the Cloudflare registration - overrides them explicitly so
+# the RouterOS password is never sent to a third party.
+#
+# WARP is applied in three independent stages.  A failure in one of them is
+# recorded in `deploy_failures` and the deployment continues; stages that
+# genuinely cannot work without an earlier one are skipped by their `when`.
+- name: Ensure the WARP WireGuard interface exists
+  block:
+    - name: Read WireGuard interfaces
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/interface/wireguard"
+        method: GET
+        status_code: 200
+      register: warp_interfaces
+      # The response carries the WireGuard private key.
+      no_log: true
+
+    - name: Create the WARP WireGuard interface when absent
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/interface/wireguard/add"
+        method: POST
+        body_format: json
+        body:
+          name: wg-warp
+          mtu: '1280'
+        status_code: 200
+      when: >-
+        (warp_interfaces.json | default([])
+        | selectattr('name', 'equalto', 'wg-warp') | list | length) == 0
+
+    - name: Read the created WARP WireGuard interface
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/interface/wireguard"
+        method: GET
+        status_code: 200
+      register: warp_interfaces_after_create
+      no_log: true
+
+    - name: Select WARP interface details
+      ansible.builtin.set_fact:
+        warp_interface: >-
+          {{ warp_interfaces_after_create.json
+          | selectattr('name', 'equalto', 'wg-warp') | first }}
+        warp_interface_ready: true
+      no_log: true
+  rescue:
+    - name: Record the WARP interface failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: WARP WireGuard interface
+
+- name: Register the WARP public key with Cloudflare
+  when: warp_interface_ready | default(false)
+  block:
+    - name: Register the WireGuard public key with Cloudflare WARP
+      ansible.builtin.uri:
+        url: https://api.cloudflareclient.com/v0a1922/reg
+        method: POST
+        # Never inherit the RouterOS REST credentials on an external endpoint.
+        user: ~
+        password: ~
+        force_basic_auth: false
+        validate_certs: true
+        headers:
+          User-Agent: okhttp/3.12.1
+          CF-Client-Version: a-6.3-1922
+        body_format: json
+        body:
+          fcm_token: ''
+          install_id: ''
+          key: "{{ warp_interface['public-key'] }}"
+          locale: en_US
+          model: MikroTik
+          # Cloudflare expects the moment the terms were accepted, not a fixed
+          # future date.
+          tos: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%S.000Z') }}"
+          type: Android
+        status_code: 200
+      register: warp_registration
+      # Cloudflare rate-limits registrations per source address; a controller
+      # that deploys several nodes in a row hits that regularly.
+      until: warp_registration is not failed
+      retries: 3
+      delay: 15
+      no_log: true
+
+    - name: Derive Cloudflare WARP peer settings
+      ansible.builtin.set_fact:
+        warp_ipv4: "{{ warp_registration.json.config.interface.addresses.v4 }}"
+        warp_peer_public_key: "{{ warp_registration.json.config.peers[0].public_key }}"
+        warp_endpoint: "{{ warp_registration.json.config.peers[0].endpoint.host }}"
+        warp_registered: true
+      no_log: true
+
+    - name: Split the Cloudflare WARP endpoint
+      ansible.builtin.set_fact:
+        warp_endpoint_address: "{{ warp_endpoint.rsplit(':', 1)[0] }}"
+        warp_endpoint_port: "{{ warp_endpoint.rsplit(':', 1)[1] }}"
+      no_log: true
+  rescue:
+    - name: Record the Cloudflare WARP registration failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Cloudflare WARP registration
+
+# The peer and the address are created even when the registration above failed.
+# Cloudflare hands every WARP client the same peer public key, the same anycast
+# endpoint and, in practice, the same 172.16.0.2 client address, so the whole
+# WARP configuration ends up in place and only the registered key material has
+# to be replaced by hand afterwards.  The comment marks exactly those rows.
+- name: Attach the WARP peer and address
+  when: warp_interface_ready | default(false)
+  vars:
+    warp_row_comment: "{{ 'warp-auto' if (warp_registered | default(false)) else 'warp-auto UNREGISTERED: replace key and address after registering' }}"
+  block:
+    - name: Add the Cloudflare WARP peer
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/interface/wireguard/peers/add"
+        method: POST
+        body_format: json
+        body:
+          interface: wg-warp
+          public-key: "{{ warp_peer_public_key | default('bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', true) }}"
+          allowed-address: 0.0.0.0/0
+          endpoint-address: "{{ warp_endpoint_address | default('engage.cloudflareclient.com', true) }}"
+          endpoint-port: "{{ warp_endpoint_port | default('2408', true) }}"
+          persistent-keepalive: 25s
+          comment: "{{ warp_row_comment }}"
+        status_code: 200
+
+    - name: Add the WARP IPv4 address
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/address/add"
+        method: POST
+        body_format: json
+        body:
+          address: "{{ warp_ipv4 | default('172.16.0.2', true) }}/32"
+          interface: wg-warp
+          comment: "{{ warp_row_comment }}"
+        status_code: 200
+  rescue:
+    - name: Record the WARP peer failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: WARP peer and address
+
+- name: Attach WARP to routing and NAT
+  when: warp_interface_ready | default(false)
+  block:
+    - name: Add WARP to WAN
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/interface/list/member/add"
+        method: POST
+        body_format: json
+        body:
+          interface: wg-warp
+          list: WAN
+          comment: warp-auto
+        status_code: 200
+
+    - name: Add WARP masquerade
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/nat/add"
+        method: POST
+        body_format: json
+        body:
+          chain: srcnat
+          action: masquerade
+          out-interface: wg-warp
+          comment: warp-auto
+        status_code: 200
+
+    - name: Add WARP routing table
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/routing/table/add"
+        method: POST
+        body_format: json
+        body:
+          name: wg-warp
+          fib: 'true'
+          comment: warp-auto
+        status_code: 200
+
+    - name: Add WARP default route
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/route/add"
+        method: POST
+        body_format: json
+        body:
+          dst-address: 0.0.0.0/0
+          gateway: wg-warp
+          routing-table: wg-warp
+          comment: warp-auto
+        status_code: 200
+  rescue:
+    - name: Record the WARP routing failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: WARP routing table and NAT
