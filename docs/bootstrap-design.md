@@ -49,15 +49,15 @@
 
 - WARP: WireGuard-интерфейс `wg-warp`, регистрация ключа в API Cloudflare,
   peer, адрес, NAT, таблица и маршрут `wg-warp`, `wg-warp` в `WAN`;
-- bridge `Remna`, veth-интерфейсы `caddy`, `remna-node`, `veth-warp`,
-  каталоги, Caddyfile, envs/mounts, контейнеры `remna-node` (интерфейсы
-  `remna-node` и `veth-warp`) и `caddy` (`remnanode_image`, `caddy_image`) с
-  `privileged=yes`, без запуска;
+- bridge `Remna`, veth-интерфейсы `caddy` (`192.168.243.2/28`) и
+  `remna-node` (`192.168.243.3/28` и `192.168.243.4/28`), каталоги,
+  Caddyfile, envs/mounts, контейнеры `remna-node` и `caddy`
+  (`remnanode_image`, `caddy_image`) с `privileged=yes`, без запуска;
 - dst-nat TCP/443 и TCP/563, для 563 — только из `WhiteList`;
 - правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`. Порядок
   mangle `prerouting`: `retain established`, `accept WAN`, mark-routing для
   установленных соединений с меткой `WARP`, исключения `WhiteList` и `DNS`,
-  `accept Caddy`, маркировка соединений с `veth-warp`, региональная
+  `accept Caddy`, маркировка соединений с `192.168.243.4`, региональная
   маркировка, mark-routing для новых соединений с меткой `WARP`;
 - scheduler'ы `ADDRESS_LISTS` (раз в сутки), `TOR_NODES` (раз в 6 часов) и
   `ABUSE_LISTS_ON_BOOT` (при загрузке).
