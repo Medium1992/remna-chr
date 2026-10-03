@@ -460,6 +460,10 @@
   vars:
     routeros_rest_base_url: "https://{{ target_ipv4 }}:{{ routeros_rest_port | default('8730', true) }}/rest"
     routeros_script_policy: ftp,reboot,read,write,policy,test,password,sniff,sensitive,romon
+    # Swap: a file-backed ext4 disk on the system disk, holding the swap file.
+    chr_swap_enabled: true
+    chr_swap_disk_size: 2150.4MiB
+    chr_swap_file_size: 1945.6MiB
     # Sources a fork may want to point at its own builds.  All of them can
     # be overridden as extra variables, like any Survey field.
     ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
@@ -489,6 +493,12 @@
       force_basic_auth: true
       validate_certs: false
   tasks:
+    # First of the REST stages, so later stages such as the container image
+    # pulls already run with swap available.
+    - name: Configure swap on the CHR
+      ansible.builtin.include_tasks: tasks/configure_swap_rest.yml
+      when: chr_swap_enabled | bool
+
     - name: Install the managed RouterOS system scripts
       block:
         - name: Read existing RouterOS system scripts

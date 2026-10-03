@@ -76,6 +76,9 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 | `caddy_basicauth_user` | — | Пользователь Basic Auth в Caddyfile. |
 | `caddy_basicauth_password` | — | Пароль Basic Auth, до 72 байт. |
 | `remnanode_secret_key` | пусто | Значение переменной окружения `SECRET_KEY` контейнера Remnawave Node. |
+| `chr_swap_enabled` | `true` | `false` отключает создание swap на CHR. |
+| `chr_swap_disk_size` | `2150.4MiB` | Размер файлового диска `swapsystem` (ext4). |
+| `chr_swap_file_size` | `1945.6MiB` | Размер swap-файла внутри `swapsystem`. |
 | `fail_on_skipped_stages` | `true` | `false` — итоговый статус успешный при пропущенных этапах второго этапа. |
 
 Источники:
@@ -96,6 +99,11 @@ inventory `inventory/controller.yml`. Параметры передаются ч
   в `input` добавляет источник в `PortScanners` на сутки, правило `raw`
   отбрасывает трафик из `PortScanners`. Правила DNS для bridge `Remna`
   добавляются перед PSD; PSD — предпоследнее правило `input`.
+- **Swap.** Файловый диск `/swapsystem` (слот `swapsystem`,
+  `chr_swap_disk_size`), отформатированный в ext4 и смонтированный; внутри —
+  файловый диск `/swapsystem/swapfile` (слот `file-swapsystem-swapfile`,
+  `chr_swap_file_size`) с `swap=yes`. Создаётся первым этапом настройки через
+  REST.
 - **WARP.** Интерфейс `wg-warp`, регистрация публичного ключа в API Cloudflare,
   peer, адрес, NAT и таблица маршрутизации `wg-warp`. При ошибке регистрации
   peer и адрес создаются со стандартными значениями Cloudflare и комментарием

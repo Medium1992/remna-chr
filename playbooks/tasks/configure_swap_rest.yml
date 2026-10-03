@@ -1,0 +1,70 @@
+---
+# Swap on the CHR.  Recent RouterOS 7 releases do not create a swap file
+# directly on the system disk, so a file-backed disk is created, formatted
+# ext4 and mounted first, and the swap file goes inside it.
+#
+# RouterOS credentials, force_basic_auth and validate_certs come from the
+# play-level `module_defaults` for ansible.builtin.uri.  /disk/format asks for
+# no confirmation through REST.
+- name: Configure swap on the CHR
+  block:
+    - name: Create the file-backed disk for swap
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/disk/add"
+        method: POST
+        body_format: json
+        body:
+          file-path: /swapsystem
+          file-size: "{{ chr_swap_disk_size }}"
+          slot: swapsystem
+          type: file
+        status_code: 200
+
+    - name: Read the disk list
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/disk"
+        method: GET
+        status_code: 200
+      register: chr_disks
+
+    - name: Format the file-backed disk as ext4
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/disk/format"
+        method: POST
+        body_format: json
+        body:
+          .id: "{{ (chr_disks.json | selectattr('slot', 'equalto', 'swapsystem') | first)['.id'] }}"
+          file-system: ext4
+        status_code: 200
+        timeout: 300
+
+    - name: Wait until the formatted disk is mounted
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/disk"
+        method: GET
+        status_code: 200
+      register: chr_disks_after_format
+      until: >-
+        (chr_disks_after_format.json | default([])
+        | selectattr('slot', 'equalto', 'swapsystem')
+        | selectattr('fs', 'equalto', 'ext4') | list | length) > 0
+      retries: 30
+      delay: 2
+
+    - name: Create the swap file inside the mounted disk
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/disk/add"
+        method: POST
+        body_format: json
+        body:
+          file-path: /swapsystem/swapfile
+          file-size: "{{ chr_swap_file_size }}"
+          slot: file-swapsystem-swapfile
+          swap: 'yes'
+          type: file
+        status_code: 200
+  rescue:
+    - name: Record the swap failure and continue
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+      vars:
+        failed_stage: Swap file on the CHR

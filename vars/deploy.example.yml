@@ -42,6 +42,11 @@ caddy_basicauth_user: admin
 caddy_basicauth_password: "change-me"
 # remnanode_secret_key: ""          # SECRET_KEY of the remna-node container, empty by default
 
+# Swap on the CHR: a file-backed ext4 disk holding the swap file.
+# chr_swap_enabled: true
+# chr_swap_disk_size: 2150.4MiB
+# chr_swap_file_size: 1945.6MiB
+
 # Optional overrides of the sources the playbook uses by default.
 # chr_image_repo: Medium1992/chr-container-rose
 # chr_release_tag: chr-7.24.4-container-rose-advanced

@@ -48,6 +48,10 @@
 
 Объекты, создаваемые JSON-запросами REST:
 
+- swap: файловый диск `swapsystem` (`/disk/add type=file`), форматирование в
+  ext4 (`/disk/format`, через REST без подтверждения), ожидание монтирования,
+  файловый диск `/swapsystem/swapfile` с `swap=yes`; размеры —
+  `chr_swap_disk_size` и `chr_swap_file_size`;
 - WARP: WireGuard-интерфейс `wg-warp`, регистрация ключа в API Cloudflare,
   peer, адрес, NAT, таблица и маршрут `wg-warp`, `wg-warp` в `WAN`;
 - bridge `Remna`, veth-интерфейсы `caddy` (`192.168.243.2/28`) и
