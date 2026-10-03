@@ -311,11 +311,13 @@
           comment: 'remna: accept Caddy'
         status_code: 200
 
-    # 192.168.243.4 is the second address of the remna-node veth.  After the
-    # WhiteList, DNS and Caddy exemptions above, every new connection from it
-    # is marked for wg-warp; it is the first of the connection marks, so the
-    # region rules below skip it and the final routing-mark rule sends it to
-    # wg-warp.
+    # 192.168.243.4 is the second address of the remna-node veth; xray picks
+    # it as the source address of an outbound to choose the route.  It is the
+    # first of the connection rules, after the WhiteList, DNS and Caddy
+    # exemptions above.
+    #
+    # EU: every new connection from it is marked for wg-warp, so the region
+    # rules below skip it and the final routing-mark rule sends it there.
     - name: Mark every new connection from 192.168.243.4 for WARP
       ansible.builtin.uri:
         url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
@@ -332,6 +334,23 @@
           new-connection-mark: WARP
           comment: 'remna: veth-warp'
         status_code: 200
+      when: (node_region | default('EU', true) | upper) == 'EU'
+
+    # RU: everything else from Remna is marked for wg-warp, so traffic from
+    # 192.168.243.4 is accepted here instead and leaves directly.
+    - name: Keep traffic from 192.168.243.4 direct on RU nodes
+      ansible.builtin.uri:
+        url: "{{ routeros_rest_base_url }}/ip/firewall/mangle/add"
+        method: POST
+        body_format: json
+        body:
+          action: accept
+          chain: prerouting
+          in-interface: Remna
+          src-address: 192.168.243.4
+          comment: 'remna: direct 192.168.243.4'
+        status_code: 200
+      when: (node_region | default('EU', true) | upper) == 'RU'
 
     - name: Add EU WARP mangle rules through REST
       ansible.builtin.uri:

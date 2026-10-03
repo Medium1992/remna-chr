@@ -117,10 +117,13 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 - **Policy routing** для трафика с bridge `Remna`. Не маркируются:
   соединения к адресам из `DNS` и `WhiteList`, трафик контейнера `caddy`
   (`192.168.243.2`), трафик к адресам CHR и собственный трафик CHR. Остальные
-  новые соединения маркируются в таблицу `wg-warp`:
-  - с адреса `192.168.243.4` — все (правило `remna: veth-warp`);
-  - при `node_region=EU` — к `LIST_RU`, `CLOUDFLARE` и `GEO_IP_DETECT`;
-  - при `node_region=RU` — все.
+  новые соединения:
+  - `node_region=EU`: с адреса `192.168.243.4` — все в `wg-warp` (правило
+    `remna: veth-warp`); с остальных адресов — к `LIST_RU`, `CLOUDFLARE` и
+    `GEO_IP_DETECT` в `wg-warp`;
+  - `node_region=RU`: с адреса `192.168.243.4` — без маркировки, напрямую
+    (правило `remna: direct 192.168.243.4`); с остальных адресов — все в
+    `wg-warp`.
 - **Raw drop.** Для всего трафика: источник или назначение в `SKIPA_CIDR`,
   назначение в `MAX` и `Telega`, TCP-порты 25, 465, 587. Для трафика с bridge
   `Remna`: назначение в `ABUSE_CINS`, `ABUSE_SPAMHAUS`, `TOR_NODES`. Эти три

@@ -62,7 +62,8 @@
 - правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`. Порядок
   mangle `prerouting`: `retain established`, `accept WAN`, mark-routing для
   установленных соединений с меткой `WARP`, исключения `WhiteList` и `DNS`,
-  `accept Caddy`, маркировка соединений с `192.168.243.4`, региональная
+  `accept Caddy`, правило для `192.168.243.4` (EU — маркировка `WARP`, RU —
+  `accept`), региональная
   маркировка, mark-routing для новых соединений с меткой `WARP`;
 - scheduler'ы `ADDRESS_LISTS` (раз в сутки), `TOR_NODES` (раз в 6 часов) и
   `ABUSE_LISTS_ON_BOOT` (при загрузке).
