@@ -282,6 +282,24 @@
     # Reading it directly while dd writes that disk can overwrite unread image
     # blocks and produce an intermittent, corrupt CHR boot image.  Stage the
     # final mutable image entirely in RAM first.
+    # tmpfs pages can be swapped out, and on most VPS the swap area is on the
+    # same disk dd overwrites: a swapped-out part of the staged image would be
+    # read back from blocks dd has already replaced.  Swap stays off until the
+    # machine reboots into CHR.
+    - name: Disable swap before staging the CHR image in RAM
+      ansible.builtin.command: swapoff -a
+      changed_when: true
+      failed_when: false
+      register: chr_swapoff
+
+    - name: Stop when swap cannot be disabled
+      ansible.builtin.assert:
+        that: chr_swapoff.rc == 0
+        fail_msg: >-
+          swapoff -a failed ({{ chr_swapoff.stderr | default('') | trim }}):
+          there is not enough RAM to hold the swapped-out pages, and the image
+          is never staged in memory that can be swapped to the target disk.
+
     - name: Require enough available RAM for safe CHR image staging
       ansible.builtin.shell: |
         set -euo pipefail
@@ -357,13 +375,15 @@
     - name: Render the irreversible replacement command
       ansible.builtin.template:
         src: ../templates/replace_with_chr.sh.j2
-        dest: /var/tmp/replace-with-chr.sh
+        # The script and its log stay in the tmpfs next to the image: nothing
+        # the replacement reads or writes may live on the disk it overwrites.
+        dest: /run/chr-stage/replace-with-chr.sh
         mode: '0700'
 
     - name: Start the disk replacement and intentionally lose SSH
       ansible.builtin.shell: |
-        nohup /bin/bash /var/tmp/replace-with-chr.sh \
-          >/var/tmp/replace-with-chr.log 2>&1 </dev/null &
+        nohup /bin/bash /run/chr-stage/replace-with-chr.sh \
+          >/run/chr-stage/replace-with-chr.log 2>&1 </dev/null &
       args:
         executable: /bin/bash
       changed_when: true

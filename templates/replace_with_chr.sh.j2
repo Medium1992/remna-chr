@@ -13,8 +13,9 @@ settle() {
   while (( SECONDS < until )); do :; done
 }
 
-# Freeze Linux writes before replacing its root disk.  The image and script are
-# already resident outside it, in tmpfs and process memory respectively.
+# Freeze Linux writes before replacing its root disk.  The image, this script
+# and its log are in tmpfs, and swap was disabled before the image was staged,
+# so no tmpfs page has to be read back from the disk being overwritten.
 echo u > /proc/sysrq-trigger
 settle 7
 
