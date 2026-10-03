@@ -1,12 +1,12 @@
 # Схема раскатки CHR
 
 Образ CHR: пакеты `container` и `rose-storage`, `device-mode` `advanced` с
-`container=yes` и `traffic-gen=yes`, пустая конфигурация. По умолчанию —
-релиз RouterOS 7.24.4 из
+`container=yes` и `traffic-gen=yes`, пустая конфигурация. Версия — `chr_version`: `latest` (по умолчанию, релиз с пометкой Latest), `long-term` или конкретная версия; релиз
+`chr-<chr_version>-container-rose-advanced` из
 [`chr-container-rose`](https://github.com/Medium1992/chr-container-rose)
-(переменные `chr_image_repo`, `chr_release_tag`, `chr_asset_name`,
-`chr_asset_sha256`). Образ загружается по прямой ссылке на ассет релиза и
-сверяется с `chr_asset_sha256`. Адреса VPS, учётные данные и конфигурация в
+(`chr_image_repo`). Образ загружается по прямой ссылке на ассет релиза и
+сверяется с SHA-256 из файла `.sha256` того же релиза либо с
+`chr_asset_sha256`, если он задан. Адреса VPS, учётные данные и конфигурация в
 образе отсутствуют.
 
 Раскатка выполняется в два этапа.
@@ -52,13 +52,14 @@
   ext4 (`/disk/format`, через REST без подтверждения), ожидание монтирования,
   файловый диск `/swapsystem/swapfile` с `swap=yes`; размеры —
   `chr_swap_disk_size` и `chr_swap_file_size`;
-- WARP: WireGuard-интерфейс `wg-warp`, регистрация ключа в API Cloudflare,
+- WARP: WireGuard-интерфейс `wg-warp` (MTU `warp_mtu`, по умолчанию 1420), регистрация ключа в API Cloudflare,
   peer, адрес, NAT, таблица и маршрут `wg-warp`, `wg-warp` в `WAN`;
 - bridge `Remna`, veth-интерфейсы `caddy` (`192.168.243.2/28`) и
   `remna-node` (`192.168.243.3/28` и `192.168.243.4/28`), каталоги,
   Caddyfile, envs/mounts, контейнеры `remna-node` и `caddy`
   (`remnanode_image`, `caddy_image`) с `privileged=yes`, без запуска;
-- dst-nat TCP/443 и TCP/563, для 563 — только из `WhiteList`;
+- dst-nat TCP/443 и TCP/`remnanode_node_port` (по умолчанию 2222, только из
+  `WhiteList`); тот же порт — `NODE_PORT` в окружении `remna-node`;
 - правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`. Порядок
   mangle `prerouting`: `retain established`, `accept WAN`, mark-routing для
   установленных соединений с меткой `WARP`, исключения `WhiteList` и `DNS`,

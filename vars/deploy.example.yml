@@ -41,6 +41,9 @@ node_domain: node.example.com
 caddy_basicauth_user: admin
 caddy_basicauth_password: "change-me"
 # remnanode_secret_key: ""          # SECRET_KEY of the remna-node container, empty by default
+# remnanode_node_port: 2222         # NODE_PORT, also published from the WAN to WhiteList
+# warp_mtu: 1420                    # MTU of wg-warp, 1280-1500
+# chr_version: latest               # latest, long-term or a version such as 7.24.5
 
 # Swap on the CHR: a file-backed ext4 disk holding the swap file.
 # chr_swap_enabled: true
@@ -49,9 +52,7 @@ caddy_basicauth_password: "change-me"
 
 # Optional overrides of the sources the playbook uses by default.
 # chr_image_repo: Medium1992/chr-container-rose
-# chr_release_tag: chr-7.24.4-container-rose-advanced
-# chr_asset_name: chr-7.24.4-container-rose.img
-# chr_asset_sha256: c022dc1059701dc078b7d06e04dc4effc0cb7c4f61056b1068b4a23f97247474
+# chr_asset_sha256: ""               # empty: taken from the release's .sha256 file
 # ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
 # remnanode_image: ghcr.io/medium1992/remnanode-ros
 # caddy_image: ghcr.io/medium1992/caddy-tblocker

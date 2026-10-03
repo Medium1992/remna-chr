@@ -28,7 +28,7 @@
         body_format: json
         body:
           name: wg-warp
-          mtu: '1280'
+          mtu: "{{ warp_mtu | string }}"
         status_code: 200
       when: >-
         (warp_interfaces.json | default([])

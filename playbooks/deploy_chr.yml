@@ -19,9 +19,16 @@
           - (chr_license_level | default('p-unlimited', true)) in ['free', 'p1', 'p10', 'p-unlimited']
           - (routeros_rest_port | default('8730', true) | int) >= 1
           - (routeros_rest_port | default('8730', true) | int) <= 65535
+          # The node port is published by dst-nat on the WAN interface, so it
+          # must not shadow SSH, Winbox, REST or the HTTPS port of the node.
+          - (remnanode_node_port | default(2222, true) | int) >= 1
+          - (remnanode_node_port | default(2222, true) | int) <= 65535
+          - (remnanode_node_port | default(2222, true) | int) not in [22, 443, 8291, (routeros_rest_port | default('8730', true) | int)]
+          - (warp_mtu | default(1420, true) | int) >= 1280
+          - (warp_mtu | default(1420, true) | int) <= 1500
           - (node_region | default('EU', true) | upper) in ['EU', 'RU']
           - node_domain | default('') is match('^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
-        fail_msg: "Check target IPv4, controller CIDR, MikroTik account, node_region and node_domain."
+        fail_msg: "Check target IPv4, controller CIDR, MikroTik account, remnanode_node_port (1-65535, not 22, 443, 8291 or the REST port), warp_mtu (1280-1500), node_region and node_domain."
 
     - name: Require an SSH password or private key
       ansible.builtin.assert:
@@ -218,14 +225,18 @@
   # For non-root SSH users, host variables above execute every privileged task
   # directly through sudo.  Do not use a shell-level `sudo su`.
   vars:
-    # Images come from the public chr-container-rose releases.  Version and
-    # SHA-256 stay pinned here on purpose: a forced rebuild upstream changes
-    # the checksum, and the deployment then stops before touching the disk
-    # until the pin is updated deliberately.
+    # RouterOS version of the CHR image: latest (the release marked Latest in
+    # chr_image_repo, the newest stable build), long-term (the newest release
+    # labelled long-term) or an exact version such as 7.24.5.  Tag and asset
+    # names follow from the resolved version.
+    chr_version: latest
     chr_image_repo: Medium1992/chr-container-rose
-    chr_release_tag: chr-7.24.4-container-rose-advanced
-    chr_asset_name: chr-7.24.4-container-rose.img
-    chr_asset_sha256: c022dc1059701dc078b7d06e04dc4effc0cb7c4f61056b1068b4a23f97247474
+    chr_release_tag: "chr-{{ chr_resolved_version }}-container-rose-advanced"
+    chr_asset_name: "chr-{{ chr_resolved_version }}-container-rose.img"
+    # Empty: the image is checked against the .sha256 file published with the
+    # release.  A value pins the exact image; any other image, a rebuilt
+    # release included, then stops the run before the disk is touched.
+    chr_asset_sha256: ""
   tasks:
     - name: Require a Debian-family target
       ansible.builtin.assert:
@@ -254,7 +265,93 @@
       ansible.builtin.set_fact:
         deployment: "{{ chr_preflight.stdout | from_json }}"
 
-    - name: Download the pinned CHR raw image to the target VPS
+    - name: Validate the requested RouterOS version
+      ansible.builtin.assert:
+        that: >-
+          (chr_version | string) in ['latest', 'long-term']
+          or (chr_version | string is match('^[0-9]+\.[0-9]+(\.[0-9]+)?$'))
+        fail_msg: "chr_version must be latest, long-term or a version such as 7.24.5, not '{{ chr_version }}'."
+
+    # No GitHub API here: without a token it allows 60 requests an hour per IP.
+    # The web URL of the latest release redirects to its tag page instead.
+    - name: Find the release marked Latest
+      ansible.builtin.uri:
+        url: "https://github.com/{{ chr_image_repo }}/releases/latest"
+        follow_redirects: none
+        status_code: 302
+      register: chr_latest_lookup
+      until: chr_latest_lookup is succeeded
+      retries: 3
+      delay: 10
+      when: (chr_version | string) == 'latest'
+
+    # The long-term version comes from the file RouterOS itself reads for
+    # updates.  A long-term version released by MikroTik but not yet built
+    # stops the run at the checksum download, before the disk is touched.
+    - name: Find the current long-term RouterOS version
+      ansible.builtin.uri:
+        url: https://upgrade.mikrotik.com/routeros/NEWESTa7.long-term
+        return_content: true
+        status_code: 200
+      register: chr_long_term_lookup
+      until: chr_long_term_lookup is succeeded
+      retries: 3
+      delay: 10
+      when: (chr_version | string) == 'long-term'
+
+    - name: Resolve the CHR version to install
+      ansible.builtin.set_fact:
+        chr_resolved_version: >-
+          {%- if (chr_version | string) == 'latest' -%}
+          {{ (chr_latest_lookup.location | default('')).split('/') | last
+             | replace('chr-', '') | replace('-container-rose-advanced', '') }}
+          {%- elif (chr_version | string) == 'long-term' -%}
+          {{ (chr_long_term_lookup.content | default('') | trim).split() | first | default('') }}
+          {%- else -%}
+          {{ chr_version | string }}
+          {%- endif -%}
+
+    - name: Refuse an unresolved CHR version
+      ansible.builtin.assert:
+        that: chr_resolved_version is match('^[0-9]+\.[0-9]+(\.[0-9]+)?$')
+        fail_msg: "chr_version '{{ chr_version }}' did not resolve to a release in {{ chr_image_repo }}."
+
+    - name: Show the RouterOS version being installed
+      ansible.builtin.debug:
+        msg: "RouterOS {{ chr_resolved_version }} (chr_version={{ chr_version }}, release {{ chr_release_tag }})"
+
+    - name: Read the SHA-256 published with the CHR release
+      ansible.builtin.uri:
+        url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}.sha256"
+        return_content: true
+        status_code: [200, 404]
+      register: chr_published_sha256
+      until: chr_published_sha256 is succeeded
+      retries: 3
+      delay: 10
+      when: chr_asset_sha256 | default('', true) | length == 0
+
+    - name: Require a published release for the requested version
+      ansible.builtin.assert:
+        that: chr_published_sha256.status | default(200) == 200
+        fail_msg: >-
+          {{ chr_image_repo }} has no release {{ chr_release_tag }}.  A version
+          MikroTik has just published may not be built yet; set chr_version to
+          a released version.
+      when: chr_asset_sha256 | default('', true) | length == 0
+
+    - name: Select the expected CHR image checksum
+      ansible.builtin.set_fact:
+        chr_expected_sha256: >-
+          {{ (chr_asset_sha256 if (chr_asset_sha256 | default('', true) | length > 0)
+              else (chr_published_sha256.content | trim).split() | first) | lower }}
+
+    - name: Refuse a malformed CHR image checksum
+      ansible.builtin.assert:
+        that: chr_expected_sha256 is match('^[0-9a-f]{64}$')
+        fail_msg: "No valid SHA-256 for {{ chr_asset_name }}: '{{ chr_expected_sha256 }}'."
+
+    - name: Download the CHR raw image to the target VPS
       ansible.builtin.get_url:
         url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}"
         dest: /var/tmp/chr-image.img
@@ -274,7 +371,7 @@
     - name: Verify the downloaded CHR image before touching the disk
       ansible.builtin.assert:
         that:
-          - chr_image_stat.stat.checksum == chr_asset_sha256
+          - chr_image_stat.stat.checksum == chr_expected_sha256
           - chr_image_stat.stat.size < deployment.dd_target_disk_size_bytes
         fail_msg: "CHR image checksum or target disk size validation failed."
 
@@ -342,7 +439,7 @@
     - name: Refuse an incomplete RAM-staged CHR image
       ansible.builtin.assert:
         that:
-          - chr_ram_image_stat.stat.checksum == chr_asset_sha256
+          - chr_ram_image_stat.stat.checksum == chr_expected_sha256
           - chr_ram_image_stat.stat.size == chr_image_stat.stat.size
         fail_msg: "RAM staging changed or truncated the verified CHR image."
 
@@ -464,6 +561,12 @@
     chr_swap_enabled: true
     chr_swap_disk_size: 2150.4MiB
     chr_swap_file_size: 1945.6MiB
+    # NODE_PORT of remna-node, published from the WAN to WhiteList sources.
+    # The Survey validation applies the same 2222 default.
+    remnanode_node_port: 2222
+    # MTU of the wg-warp interface; the Survey validation applies the same
+    # 1420 default and accepts 1280-1500.
+    warp_mtu: 1420
     # Sources a fork may want to point at its own builds.  All of them can
     # be overridden as extra variables, like any Survey field.
     ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts

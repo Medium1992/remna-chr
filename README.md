@@ -76,6 +76,9 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 | `caddy_basicauth_user` | — | Пользователь Basic Auth в Caddyfile. |
 | `caddy_basicauth_password` | — | Пароль Basic Auth, до 72 байт. |
 | `remnanode_secret_key` | пусто | Значение переменной окружения `SECRET_KEY` контейнера Remnawave Node. |
+| `remnanode_node_port` | `2222` | `NODE_PORT` контейнера Remnawave Node и порт dst-nat из `WhiteList`; не 22, 443, 8291 и не порт REST. |
+| `warp_mtu` | `1420` | MTU интерфейса `wg-warp`, 1280–1500. |
+| `chr_version` | `latest` | `latest` — релиз с пометкой Latest в `chr_image_repo`; `long-term` — версия из `NEWESTa7.long-term`; либо версия вида `7.24.5`. |
 | `chr_swap_enabled` | `true` | `false` отключает создание swap на CHR. |
 | `chr_swap_disk_size` | `2150.4MiB` | Размер файлового диска `swapsystem` (ext4). |
 | `chr_swap_file_size` | `1945.6MiB` | Размер swap-файла внутри `swapsystem`. |
@@ -85,7 +88,9 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 
 | Переменная | По умолчанию |
 | --- | --- |
-| `chr_image_repo`, `chr_release_tag`, `chr_asset_name`, `chr_asset_sha256` | RouterOS 7.24.4 из [`chr-container-rose`](https://github.com/Medium1992/chr-container-rose) |
+| `chr_image_repo` | [`Medium1992/chr-container-rose`](https://github.com/Medium1992/chr-container-rose) |
+| `chr_release_tag`, `chr_asset_name` | `chr-<версия>-container-rose-advanced`, `chr-<версия>-container-rose.img` |
+| `chr_asset_sha256` | пусто — SHA-256 из файла `.sha256` релиза |
 | `ip_lists_base_url` | фрагменты address-list'ов из [`MikroTik_IPlist`](https://github.com/Medium1992/MikroTik_IPlist) |
 | `remnanode_image` | `ghcr.io/medium1992/remnanode-ros` |
 | `caddy_image` | `ghcr.io/medium1992/caddy-tblocker` |
@@ -105,12 +110,12 @@ inventory `inventory/controller.yml`. Параметры передаются ч
   `chr_swap_file_size`) с `swap=yes`. Создаётся первым этапом настройки через
   REST.
 - **WARP.** Интерфейс `wg-warp`, регистрация публичного ключа в API Cloudflare,
-  peer, адрес, NAT и таблица маршрутизации `wg-warp`. При ошибке регистрации
+  peer, адрес, NAT и таблица маршрутизации `wg-warp`; MTU — `warp_mtu`. При ошибке регистрации
   peer и адрес создаются со стандартными значениями Cloudflare и комментарием
   `warp-auto UNREGISTERED`.
 - **Контейнеры.** Bridge `Remna` (`192.168.243.0/28`), veth-интерфейсы,
-  Caddyfile, правила DNS для bridge, dst-nat TCP/443 и TCP/563 (для 563 —
-  только из `WhiteList`), контейнеры `remna-node` и `caddy` с
+  Caddyfile, правила DNS для bridge, dst-nat TCP/443 и TCP/`remnanode_node_port`
+  (только из `WhiteList`), контейнеры `remna-node` и `caddy` с
   `privileged=yes` (RouterOS 7.24+). У veth `remna-node` два адреса:
   `192.168.243.3/28` и `192.168.243.4/28`. Контейнеры создаются и
   загружаются без запуска.
@@ -147,10 +152,20 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 
 ## Версия RouterOS
 
-Образ определяется переменными `chr_release_tag`, `chr_asset_name` и
-`chr_asset_sha256` в `playbooks/deploy_chr.yml`. Для другой версии
-подставляются значения из соответствующего релиза `chr-container-rose`. При
-несовпадении SHA-256 выполнение останавливается до записи на диск.
+`chr_version` принимает три вида значений:
+
+- `latest` (по умолчанию) — версия релиза с пометкой Latest в
+  `chr_image_repo`, определяется по перенаправлению
+  `https://github.com/<chr_image_repo>/releases/latest`;
+- `long-term` — версия из `https://upgrade.mikrotik.com/routeros/NEWESTa7.long-term`;
+- конкретная версия, например `7.24.5`.
+
+Используется релиз `chr-<версия>-container-rose-advanced`. SHA-256 образа
+берётся из файла `chr-<версия>-container-rose.img.sha256` того же релиза; если
+задан `chr_asset_sha256`, образ сверяется с ним. GitHub API не используется.
+При отсутствии релиза или несовпадении SHA-256 выполнение останавливается до
+записи на диск. Определённая версия выводится в лог задачей
+`Show the RouterOS version being installed`.
 
 ## Лицензия
 

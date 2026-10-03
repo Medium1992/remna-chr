@@ -123,7 +123,7 @@
         - endpoint: container/mounts/add
           body: {list: caddy, src: /caddy_conf, dst: /etc/caddy}
         - endpoint: container/envs/add
-          body: {list: remnanode, key: NODE_PORT, value: '563'}
+          body: {list: remnanode, key: NODE_PORT, value: "{{ remnanode_node_port | string }}"}
         - endpoint: container/envs/add
           body: {list: remnanode, key: SECRET_KEY, value: "{{ remnanode_secret_key | default('', true) }}"}
       loop_control:
@@ -177,7 +177,7 @@
         # `wan_interface_name` is resolved from the original VPS MAC by the play,
         # exactly like autorun.scr does; ether1 is only its fallback.
         - {chain: dstnat, action: dst-nat, protocol: tcp, in-interface: "{{ wan_interface_name | default('ether1', true) }}", dst-port: '443', to-addresses: 192.168.243.3, comment: 'remna: public HTTPS to node'}
-        - {chain: dstnat, action: dst-nat, protocol: tcp, in-interface: "{{ wan_interface_name | default('ether1', true) }}", dst-port: '563', src-address-list: WhiteList, to-addresses: 192.168.243.3, comment: 'remna: WhiteList node port 563'}
+        - {chain: dstnat, action: dst-nat, protocol: tcp, in-interface: "{{ wan_interface_name | default('ether1', true) }}", dst-port: "{{ remnanode_node_port | string }}", src-address-list: WhiteList, to-addresses: 192.168.243.3, comment: "remna: WhiteList node port {{ remnanode_node_port }}"}
       loop_control:
         label: "{{ item.comment }}"
   rescue:
