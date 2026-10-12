@@ -79,6 +79,8 @@
         - {name: temp, type: directory}
         - {name: caddy_conf, type: directory}
         - {name: Containers, type: directory}
+        # The /__down response is a Caddy template; {% raw %} keeps Ansible from
+        # evaluating its braces as Jinja.
         - name: caddy_conf/Caddyfile
           type: file
           contents: |
@@ -93,9 +95,18 @@
               }
             }
             https://{{ node_domain }} {
-              basicauth {
+              basic_auth {
                 {{ caddy_basicauth_user }} {{ caddy_basicauth_password_hash }}
               }
+            }
+            http://internal.speedtest:8080 {
+
+              handle /__down {
+                templates
+                respond `{% raw %}{{repeat (int (max 0 (min 1048576 (atoi (.Req.URL.Query.Get "bytes"))))) "0"}}{% endraw %}`
+              }
+
+              respond 404
             }
       # The last item carries the BasicAuth hash.
       no_log: true
