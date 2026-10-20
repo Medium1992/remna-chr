@@ -78,6 +78,8 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 | `remnanode_secret_key` | пусто | Значение переменной окружения `SECRET_KEY` контейнера Remnawave Node. |
 | `remnanode_node_port` | `2222` | `NODE_PORT` контейнера Remnawave Node и порт dst-nat из `WhiteList`; не 22, 443, 8291 и не порт REST. |
 | `warp_mtu` | `1420` | MTU интерфейса `wg-warp`, 1280–1500. |
+| `warp_bypass_enabled` | `true` | `false` не создаёт scheduler `WG` для скрипта `WG_BYPASS`. |
+| `warp_bypass_interval` | `5m` | Интервал scheduler'а `WG`. |
 | `chr_version` | `latest` | `latest` — релиз с пометкой Latest в `chr_image_repo`; `long-term` — версия из `NEWESTa7.long-term`; либо версия вида `7.24.5`. |
 | `chr_swap_enabled` | `true` | `false` отключает создание swap на CHR. |
 | `chr_swap_disk_size` | `2150.4MiB` | Размер файлового диска `swapsystem` (ext4). |
@@ -112,7 +114,13 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 - **WARP.** Интерфейс `wg-warp`, регистрация публичного ключа в API Cloudflare,
   peer, адрес, NAT и таблица маршрутизации `wg-warp`; MTU — `warp_mtu`. При ошибке регистрации
   peer и адрес создаются со стандартными значениями Cloudflare и комментарием
-  `warp-auto UNREGISTERED`.
+  `warp-auto UNREGISTERED`. Комментарий peer'а оканчивается на `BYPASS`.
+- **WG_BYPASS.** Скрипт `routeros/wg_bypass.rsc` обрабатывает peer'ы с
+  `BYPASS` в комментарии, если последний handshake старше 3m20s или peer
+  выключен: меняет `listen-port` интерфейса на случайный, отправляет на
+  endpoint UDP-пакеты из `i1`–`i5` и `Jc` пакетов случайного содержимого через
+  `/tool/traffic-generator/inject`, затем снова включает peer. Scheduler `WG`
+  запускает его раз в `warp_bypass_interval`.
 - **Контейнеры.** Bridge `Remna` (`192.168.243.0/28`), veth-интерфейсы,
   Caddyfile, правила DNS для bridge, dst-nat TCP/443 и TCP/`remnanode_node_port`
   (только из `WhiteList`), контейнеры `remna-node` и `caddy` с
