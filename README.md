@@ -119,9 +119,10 @@ inventory `inventory/controller.yml`. Параметры передаются ч
   `privileged=yes` (RouterOS 7.24+). У veth `remna-node` два адреса:
   `192.168.243.3/28` и `192.168.243.4/28`. Контейнеры создаются и
   загружаются без запуска.
-- **Caddyfile.** Сайт `https://<node_domain>` с Basic Auth и PROXY protocol на
-  `:443`; сайт `http://internal.speedtest:8080`: `/__down?bytes=N` отвечает
-  телом из `N` символов `0` (не более 1048576), остальные пути — 404.
+- **Caddyfile.** PROXY protocol из `192.168.243.0/28` на `:443` и `:8080`.
+  Сайт `https://<node_domain>` с Basic Auth; сайт
+  `http://internal.speedtest:8080`: `/__down?bytes=N` отвечает телом из `N`
+  символов `0` (не более 1048576), остальные пути — 404.
 - **Policy routing** для трафика с bridge `Remna`. Не маркируются:
   соединения к адресам из `DNS` и `WhiteList`, трафик контейнера `caddy`
   (`192.168.243.2`), трафик к адресам CHR и собственный трафик CHR. Остальные

@@ -59,7 +59,8 @@
   Caddyfile, envs/mounts, контейнеры `remna-node` и `caddy`
   (`remnanode_image`, `caddy_image`) с `privileged=yes`, без запуска; в
   Caddyfile — сайты `https://<node_domain>` и `http://internal.speedtest:8080`
-  (`/__down?bytes=N`);
+  (`/__down?bytes=N`), PROXY protocol из `192.168.243.0/28` на `:443` и
+  `:8080`;
 - dst-nat TCP/443 и TCP/`remnanode_node_port` (по умолчанию 2222, только из
   `WhiteList`); тот же порт — `NODE_PORT` в окружении `remna-node`;
 - правила mangle, raw и address-list'ы `DNS`, `MAX`, `Telega`. Порядок
