@@ -567,6 +567,11 @@
     # MTU of the wg-warp interface; the Survey validation applies the same
     # 1420 default and accepts 1280-1500.
     warp_mtu: 1420
+    # WARP bypass: a RouterOS script (WG_BYPASS) crafts UDP toward the
+    # Cloudflare endpoint to re-prime wg-warp when the peer stops handshaking;
+    # the WG scheduler runs it on this interval.
+    warp_bypass_enabled: true
+    warp_bypass_interval: 5m
     # Sources a fork may want to point at its own builds.  All of them can
     # be overridden as extra variables, like any Survey field.
     ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
@@ -589,6 +594,8 @@
         source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/tor_nodes.rsc.j2') }}"
       - name: ADDRESS_LISTS
         source: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../routeros/address_lists_refresh.rsc.j2') }}"
+      - name: WG_BYPASS
+        source: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../routeros/wg_bypass.rsc') }}"
   module_defaults:
     ansible.builtin.uri:
       user: "{{ routeros_rest_user | default('ansible', true) }}"
@@ -734,6 +741,27 @@
           ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
           vars:
             failed_stage: Daily ADDRESS_LISTS scheduler
+
+    - name: Create the WARP bypass scheduler
+      when: warp_bypass_enabled | default(true) | bool
+      block:
+        - name: Create the WARP bypass scheduler through REST
+          ansible.builtin.uri:
+            url: "{{ routeros_rest_base_url }}/system/scheduler/add"
+            method: POST
+            body_format: json
+            body:
+              name: WG
+              interval: "{{ warp_bypass_interval | default('5m', true) }}"
+              start-time: '00:00:00'
+              on-event: /system/script/run WG_BYPASS
+              policy: "{{ routeros_script_policy }}"
+            status_code: 200
+      rescue:
+        - name: Record the WARP bypass scheduler failure and continue
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/record_failure.yml"
+          vars:
+            failed_stage: WARP bypass scheduler
 
     - name: Create the boot-time abuse-list scheduler
       block:

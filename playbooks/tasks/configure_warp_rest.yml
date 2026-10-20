@@ -131,7 +131,7 @@
           endpoint-address: "{{ warp_endpoint_address | default('engage.cloudflareclient.com', true) }}"
           endpoint-port: "{{ warp_endpoint_port | default('2408', true) }}"
           persistent-keepalive: 25s
-          comment: "{{ warp_row_comment }}"
+          comment: "{{ warp_row_comment }} BYPASS"
         status_code: 200
 
     - name: Add the WARP IPv4 address
