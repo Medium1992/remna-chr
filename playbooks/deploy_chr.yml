@@ -157,7 +157,7 @@
                 raise SystemExit("password is empty")
             if len(password) > 72:
                 raise SystemExit(f"password is {len(password)} bytes; bcrypt permits at most 72")
-            print(bcrypt.hashpw(password, bcrypt.gensalt(rounds=14)).decode("ascii"))
+            print(bcrypt.hashpw(password, bcrypt.gensalt(rounds=10)).decode("ascii"))
         stdin: "{{ caddy_basicauth_password }}"
         stdin_add_newline: false
       register: caddy_bcrypt_result

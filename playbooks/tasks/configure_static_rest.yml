@@ -92,6 +92,11 @@
                   }
                   tls
                 }
+                protocols h1 h2
+                timeouts {
+                  read_header 10s
+                  idle 5m
+                }
               }
               servers :8080 {
                 listener_wrappers {
@@ -99,6 +104,12 @@
                     allow 192.168.243.0/28
                   }
                 }
+                timeouts {
+                  read_header 10s
+                }
+              }
+              log {
+                level ERROR
               }
             }
             https://{{ node_domain }} {
