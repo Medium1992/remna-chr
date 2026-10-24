@@ -81,6 +81,7 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 | `warp_bypass_enabled` | `true` | `false` не создаёт scheduler `WG` для скрипта `WG_BYPASS`. |
 | `warp_bypass_interval` | `5m` | Интервал scheduler'а `WG`. |
 | `chr_version` | `latest` | `latest` — релиз с пометкой Latest в `chr_image_repo`; `long-term` — версия из `NEWESTa7.long-term`; либо версия вида `7.24.5`. |
+| `chr_boot_mode` | `auto` | `auto` — UEFI-образ, если на VPS есть `/sys/firmware/efi`, иначе BIOS-образ; `bios` или `uefi` — явный выбор. |
 | `chr_swap_enabled` | `true` | `false` отключает создание swap на CHR. |
 | `chr_swap_disk_size` | `2150.4MiB` | Размер файлового диска `swapsystem` (ext4). |
 | `chr_swap_file_size` | `1945.6MiB` | Размер swap-файла внутри `swapsystem`. |
@@ -172,12 +173,18 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 - `long-term` — версия из `https://upgrade.mikrotik.com/routeros/NEWESTa7.long-term`;
 - конкретная версия, например `7.24.5`.
 
-Используется релиз `chr-<версия>-container-rose-advanced`. SHA-256 образа
-берётся из файла `chr-<версия>-container-rose.img.sha256` того же релиза; если
-задан `chr_asset_sha256`, образ сверяется с ним. GitHub API не используется.
+Используется релиз `chr-<версия>-container-rose-advanced`. Ассет зависит от
+`chr_boot_mode`: `chr-<версия>-container-rose.img` для BIOS,
+`chr-<версия>-container-rose-uefi.img` для UEFI (раздел 1 в FAT16, GPT с
+гибридным MBR). В режиме `auto` выбор определяется наличием
+`/sys/firmware/efi` в Linux на VPS. Релизы, собранные до появления
+UEFI-образов, содержат только BIOS-образ. SHA-256 образа берётся из файла
+`<ассет>.sha256` того же релиза; если задан `chr_asset_sha256`, образ
+сверяется с ним. GitHub API не используется.
 При отсутствии релиза или несовпадении SHA-256 выполнение останавливается до
 записи на диск. Определённая версия выводится в лог задачей
-`Show the RouterOS version being installed`.
+`Show the RouterOS version being installed` вместе с режимом загрузки и
+именем ассета.
 
 ## Лицензия
 

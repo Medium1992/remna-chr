@@ -230,9 +230,13 @@
     # labelled long-term) or an exact version such as 7.24.5.  Tag and asset
     # names follow from the resolved version.
     chr_version: latest
+    # Firmware of the VPS: auto (UEFI when the running Linux has
+    # /sys/firmware/efi), bios or uefi.  Each release carries a BIOS image and
+    # a UEFI image; neither boots under the other firmware.
+    chr_boot_mode: auto
     chr_image_repo: Medium1992/chr-container-rose
     chr_release_tag: "chr-{{ chr_resolved_version }}-container-rose-advanced"
-    chr_asset_name: "chr-{{ chr_resolved_version }}-container-rose.img"
+    chr_asset_name: "chr-{{ chr_resolved_version }}-container-rose{{ '-uefi' if chr_resolved_boot_mode == 'uefi' else '' }}.img"
     # Empty: the image is checked against the .sha256 file published with the
     # release.  A value pins the exact image; any other image, a rebuilt
     # release included, then stops the run before the disk is touched.
@@ -271,6 +275,25 @@
           (chr_version | string) in ['latest', 'long-term']
           or (chr_version | string is match('^[0-9]+\.[0-9]+(\.[0-9]+)?$'))
         fail_msg: "chr_version must be latest, long-term or a version such as 7.24.5, not '{{ chr_version }}'."
+
+    - name: Validate the requested boot mode
+      ansible.builtin.assert:
+        that: (chr_boot_mode | string) in ['auto', 'bios', 'uefi']
+        fail_msg: "chr_boot_mode must be auto, bios or uefi, not '{{ chr_boot_mode }}'."
+
+    # The kernel exposes /sys/firmware/efi only when the firmware booted it
+    # through UEFI; the CHR written to the same disk boots the same way.
+    - name: Detect the VPS firmware
+      ansible.builtin.stat:
+        path: /sys/firmware/efi
+      register: chr_efi_dir
+      when: (chr_boot_mode | string) == 'auto'
+
+    - name: Resolve the CHR boot mode
+      ansible.builtin.set_fact:
+        chr_resolved_boot_mode: >-
+          {{ (chr_boot_mode | string) if (chr_boot_mode | string) != 'auto'
+             else ('uefi' if chr_efi_dir.stat.exists else 'bios') }}
 
     # No GitHub API here: without a token it allows 60 requests an hour per IP.
     # The web URL of the latest release redirects to its tag page instead.
@@ -318,7 +341,9 @@
 
     - name: Show the RouterOS version being installed
       ansible.builtin.debug:
-        msg: "RouterOS {{ chr_resolved_version }} (chr_version={{ chr_version }}, release {{ chr_release_tag }})"
+        msg: >-
+          RouterOS {{ chr_resolved_version }} (chr_version={{ chr_version }}, release {{ chr_release_tag }}),
+          {{ chr_resolved_boot_mode | upper }} image {{ chr_asset_name }} (chr_boot_mode={{ chr_boot_mode }})
 
     - name: Read the SHA-256 published with the CHR release
       ansible.builtin.uri:
@@ -335,9 +360,10 @@
       ansible.builtin.assert:
         that: chr_published_sha256.status | default(200) == 200
         fail_msg: >-
-          {{ chr_image_repo }} has no release {{ chr_release_tag }}.  A version
-          MikroTik has just published may not be built yet; set chr_version to
-          a released version.
+          {{ chr_image_repo }} has no {{ chr_asset_name }} in release
+          {{ chr_release_tag }}.  A version MikroTik has just published may not
+          be built yet, and releases made before the UEFI images were added
+          carry only the BIOS image; set chr_version to a release that has it.
       when: chr_asset_sha256 | default('', true) | length == 0
 
     - name: Select the expected CHR image checksum
