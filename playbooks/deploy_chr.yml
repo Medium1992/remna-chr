@@ -261,7 +261,7 @@
         cache_valid_time: 3600
 
     - name: Derive safe disk and RouterOS addressing parameters
-      ansible.builtin.script: ../scripts/chr_preflight.py
+      ansible.builtin.script: ../scripts/chr_preflight.py {{ target_ipv4 | quote }}
       changed_when: false
       register: chr_preflight
 

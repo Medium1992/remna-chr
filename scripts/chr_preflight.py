@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only discovery for a safe Ubuntu-to-CHR replacement."""
+"""Read-only discovery for a safe Ubuntu-to-CHR replacement.
+
+usage: chr_preflight.py [<target IPv4>]
+"""
 
 import ipaddress
 import json
@@ -62,8 +65,25 @@ interface_mac = next(
 if not interface_mac:
     fail(f"no MAC address found on {interface}")
 
-address = next((item for item in addresses if item["local"] == preferred_source), addresses[0])
-linux_interface = ipaddress.IPv4Interface(f"{address['local']}/{address['prefixlen']}")
+# Every distinct IPv4 of the interface moves to the CHR: some providers route
+# several public addresses to one port (static ones next to the DHCP lease),
+# and an address left behind is unreachable after the switch.  One address
+# can appear with several prefixes; the one whose network holds the gateway
+# wins.
+by_local = {}
+for item in addresses:
+    candidate = ipaddress.IPv4Interface(f"{item['local']}/{item['prefixlen']}")
+    current = by_local.get(item["local"])
+    if current is None or (gateway in candidate.network and gateway not in current.network):
+        by_local[item["local"]] = candidate
+
+# The primary address carries the default route and the source NAT: the
+# address the deployment connects to, else the route's preferred source.
+target = sys.argv[1] if len(sys.argv) > 1 else None
+primary_local = next(
+    (local for local in (target, preferred_source) if local in by_local), next(iter(by_local))
+)
+linux_interface = by_local[primary_local]
 gateway_in_linux_network = gateway in linux_interface.network
 
 if gateway_in_linux_network:
@@ -72,9 +92,18 @@ if gateway_in_linux_network:
     addressing_mode = "subnet"
 else:
     # RouterOS uses the gateway as network in point-to-point VPS /32 setups.
-    routeros_address = f"{address['local']}/32"
+    routeros_address = f"{primary_local}/32"
     routeros_network = str(gateway)
     addressing_mode = "point-to-point-/32"
+
+extra_addresses = []
+for local, iface in by_local.items():
+    if local == primary_local:
+        continue
+    if gateway in iface.network:
+        extra_addresses.append({"address": str(iface), "network": str(iface.network.network_address)})
+    else:
+        extra_addresses.append({"address": f"{local}/32", "network": local})
 
 result = {
     "root_filesystem_source": root_source,
@@ -88,7 +117,8 @@ result = {
     "linux_interface": interface,
     "linux_interface_mac": interface_mac.upper(),
     "linux_address": str(linux_interface),
-    "routeros_ipv4": str(address["local"]),
+    "routeros_ipv4": primary_local,
+    "routeros_extra_addresses": extra_addresses,
     "gateway": str(gateway),
     "gateway_in_linux_network": gateway_in_linux_network,
     "routeros_address": routeros_address,

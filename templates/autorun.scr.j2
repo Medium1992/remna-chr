@@ -31,6 +31,13 @@
     } do={
         :log error ("bootstrap: address configuration: " . $addressError)
     }
+{% for extra in deployment.routeros_extra_addresses | default([]) %}
+    :onerror extraAddressError in={
+        /ip address add address={{ extra.address }} network={{ extra.network }} interface=$wanName comment="ansible-bootstrap extra"
+    } do={
+        :log error ("bootstrap: extra address {{ extra.address }}: " . $extraAddressError)
+    }
+{% endfor %}
     :onerror routeError in={
         /ip route add gateway={{ deployment.gateway }} comment="ansible-bootstrap"
     } do={
