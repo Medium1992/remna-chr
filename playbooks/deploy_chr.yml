@@ -296,18 +296,41 @@
         that: ansible_facts['os_family'] == 'Debian'
         fail_msg: "This deployment workflow currently supports Ubuntu/Debian only."
 
-    - name: Install CHR image preparation prerequisites
-      ansible.builtin.apt:
-        name:
-          - ca-certificates
-          - coreutils
-          - curl
-          - iproute2
-          - python3
-          - util-linux
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
+    # Stock Ubuntu and Debian images already carry every tool used below, so
+    # apt is touched only when one is missing.  A fresh VPS often cannot run
+    # apt-get update (a blocked or dead mirror, unattended-upgrades holding
+    # the lock), and the apt module then fails with an empty message.
+    - name: Find CHR image preparation tools missing on the VPS
+      ansible.builtin.shell: |
+        set -u
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+        missing=""
+        command -v lsblk >/dev/null && command -v findmnt >/dev/null \
+          && command -v losetup >/dev/null && command -v mount >/dev/null \
+          && command -v mountpoint >/dev/null || missing="$missing util-linux"
+        command -v dd >/dev/null && command -v install >/dev/null \
+          || missing="$missing coreutils"
+        command -v ip >/dev/null || missing="$missing iproute2"
+        test -s /etc/ssl/certs/ca-certificates.crt || missing="$missing ca-certificates"
+        echo $missing
+      args:
+        executable: /bin/bash
+      register: chr_missing_tools
+      changed_when: false
+
+    - name: Install the missing tools {{ chr_missing_tools.stdout }}
+      ansible.builtin.shell: |
+        set -u
+        export DEBIAN_FRONTEND=noninteractive
+        apt_opts="-y -o DPkg::Lock::Timeout=300"
+        # Try the package lists already on disk first, then refresh them.
+        apt-get install $apt_opts --no-install-recommends {{ chr_missing_tools.stdout }} && exit 0
+        apt-get update -o DPkg::Lock::Timeout=300 || echo "apt-get update failed, see above" >&2
+        apt-get install $apt_opts --no-install-recommends {{ chr_missing_tools.stdout }}
+      args:
+        executable: /bin/bash
+      register: chr_tools_install
+      when: chr_missing_tools.stdout | trim | length > 0
 
     - name: Derive safe disk and RouterOS addressing parameters
       ansible.builtin.script: ../scripts/chr_preflight.py {{ target_ipv4 | quote }}
