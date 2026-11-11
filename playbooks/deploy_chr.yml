@@ -193,6 +193,49 @@
       changed_when: false
       register: management_allowlist_result
 
+    # A password pasted into a Survey field often carries a trailing newline
+    # (or CR from Windows clipboards).  sshpass sends it verbatim and the
+    # server answers "Permission denied".  Only line breaks are removed:
+    # leading or trailing spaces may be a legitimate part of a password.
+    - name: Strip line breaks around the SSH password
+      ansible.builtin.set_fact:
+        target_ssh_password_clean: >-
+          {{ target_ssh_password | default('') | regex_replace('^[\r\n]+|[\r\n]+$', '') }}
+      no_log: true
+
+    # Shows what reached the playbook without exposing the secret itself, so
+    # a wrong or truncated Survey value can be told from a server-side
+    # refusal.  debug_show_credentials=true prints the raw values instead.
+    - name: Read the public-key fingerprint of the supplied SSH key
+      ansible.builtin.command:
+        argv: [ssh-keygen, -l, -f, "{{ target_ssh_key_file.path }}"]
+      register: target_ssh_key_fingerprint
+      changed_when: false
+      failed_when: false
+      when: target_ssh_private_key | default('') | length > 0
+
+    - name: Show the SSH credentials used for the VPS
+      ansible.builtin.debug:
+        msg:
+          - "host: {{ target_ipv4 | trim }}, user: {{ target_ssh_user | default('root', true) | trim }}"
+          - >-
+            password: {{ 'not set' if target_ssh_password_clean | length == 0 else
+            (target_ssh_password_clean | length | string) ~ ' characters'
+            ~ (', line breaks stripped' if target_ssh_password_clean != (target_ssh_password | default('')) else '')
+            ~ (', starts or ends with a space' if target_ssh_password_clean != (target_ssh_password_clean | trim) else '') }}
+          - >-
+            private key: {{ (target_ssh_key_fingerprint.stdout | default('') | trim)
+            if (target_ssh_private_key | default('') | length > 0) else 'not set' }}
+          - "sudo password: {{ 'set' if target_sudo_password | default('') | length > 0 else 'not set' }}"
+
+    - name: Show the raw SSH credentials (debug_show_credentials=true)
+      ansible.builtin.debug:
+        msg:
+          - "password: [{{ target_ssh_password | default('') }}]"
+          - "sudo password: [{{ target_sudo_password | default('') }}]"
+          - "private key:\n{{ target_ssh_private_key | default('') }}"
+      when: debug_show_credentials | default(false) | bool
+
     - name: Add the one-time Ubuntu VPS target
       ansible.builtin.add_host:
         name: deployment_target
@@ -201,7 +244,7 @@
         # in a host name even though the IPv4 validation accepts it.
         ansible_host: "{{ target_ipv4 | trim }}"
         ansible_user: "{{ target_ssh_user | default('root', true) | trim }}"
-        ansible_password: "{{ target_ssh_password | default(omit, true) }}"
+        ansible_password: "{{ target_ssh_password_clean | default(omit, true) }}"
         ansible_ssh_private_key_file: "{{ target_ssh_key_file.path | default(omit) }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"
         # Avoid an implicit /root/.ansible/tmp when SSH uses a non-root user
@@ -210,7 +253,7 @@
         ansible_become: "{{ (target_ssh_user | default('root', true)) != 'root' }}"
         ansible_become_method: sudo
         ansible_become_user: root
-        ansible_become_password: "{{ target_sudo_password | default(omit, true) }}"
+        ansible_become_password: "{{ target_sudo_password | default('', true) | regex_replace('^[\r\n]+|[\r\n]+$', '') | default(omit, true) }}"
         management_allowlist: "{{ management_allowlist_result.stdout | from_json }}"
         deployment_rest_user: "{{ routeros_rest_user | default('ansible', true) }}"
         deployment_rest_port: "{{ routeros_rest_port | default('8730', true) }}"
@@ -241,6 +284,12 @@
     # release.  A value pins the exact image; any other image, a rebuilt
     # release included, then stops the run before the disk is touched.
     chr_asset_sha256: ""
+    # Prefix tried when github.com cannot be reached from the VPS (blocked or
+    # timing out): the release URL is fetched as <prefix><github URL>.  The
+    # image is still checked against the SHA-256, so the proxy cannot swap
+    # it unnoticed unless the .sha256 also came through it; set
+    # chr_asset_sha256 to rule that out.  Empty disables the fallback.
+    github_proxy: https://gh-proxy.com/
   tasks:
     - name: Require a Debian-family target
       ansible.builtin.assert:
@@ -298,15 +347,43 @@
     # No GitHub API here: without a token it allows 60 requests an hour per IP.
     # The web URL of the latest release redirects to its tag page instead.
     - name: Find the release marked Latest
-      ansible.builtin.uri:
-        url: "https://github.com/{{ chr_image_repo }}/releases/latest"
-        follow_redirects: none
-        status_code: 302
-      register: chr_latest_lookup
-      until: chr_latest_lookup is succeeded
-      retries: 3
-      delay: 10
       when: (chr_version | string) == 'latest'
+      block:
+        - name: Find the release marked Latest on github.com
+          ansible.builtin.uri:
+            url: "https://github.com/{{ chr_image_repo }}/releases/latest"
+            follow_redirects: none
+            status_code: 302
+            timeout: 20
+          register: chr_latest_lookup
+          until: chr_latest_lookup is succeeded
+          retries: 2
+          delay: 5
+
+        - name: Take the Latest tag from the github.com redirect
+          ansible.builtin.set_fact:
+            chr_latest_tag: "{{ (chr_latest_lookup.location | default('')).split('/') | last }}"
+      rescue:
+        # The proxy follows the redirect itself and returns the release page,
+        # so the tag is read from the links on that page.
+        - name: Find the release marked Latest through {{ github_proxy }}
+          ansible.builtin.uri:
+            url: "{{ github_proxy }}https://github.com/{{ chr_image_repo }}/releases/latest"
+            return_content: true
+            status_code: 200
+            timeout: 30
+          register: chr_latest_proxy_lookup
+          until: chr_latest_proxy_lookup is succeeded
+          retries: 3
+          delay: 10
+          when: github_proxy | default('', true) | length > 0
+
+        - name: Take the Latest tag from the proxied release page
+          ansible.builtin.set_fact:
+            chr_latest_tag: >-
+              {{ chr_latest_proxy_lookup.content | default('')
+                 | regex_findall('releases/tag/(chr-[0-9.]+-container-rose-advanced)')
+                 | first | default('') }}
 
     # The long-term version comes from the file RouterOS itself reads for
     # updates.  A long-term version released by MikroTik but not yet built
@@ -326,8 +403,7 @@
       ansible.builtin.set_fact:
         chr_resolved_version: >-
           {%- if (chr_version | string) == 'latest' -%}
-          {{ (chr_latest_lookup.location | default('')).split('/') | last
-             | replace('chr-', '') | replace('-container-rose-advanced', '') }}
+          {{ chr_latest_tag | default('') | replace('chr-', '') | replace('-container-rose-advanced', '') }}
           {%- elif (chr_version | string) == 'long-term' -%}
           {{ (chr_long_term_lookup.content | default('') | trim).split() | first | default('') }}
           {%- else -%}
@@ -346,15 +422,35 @@
           {{ chr_resolved_boot_mode | upper }} image {{ chr_asset_name }} (chr_boot_mode={{ chr_boot_mode }})
 
     - name: Read the SHA-256 published with the CHR release
-      ansible.builtin.uri:
-        url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}.sha256"
-        return_content: true
-        status_code: [200, 404]
-      register: chr_published_sha256
-      until: chr_published_sha256 is succeeded
-      retries: 3
-      delay: 10
       when: chr_asset_sha256 | default('', true) | length == 0
+      block:
+        - name: Read the SHA-256 from github.com
+          ansible.builtin.uri:
+            url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}.sha256"
+            return_content: true
+            status_code: [200, 404]
+            timeout: 20
+          register: chr_published_sha256
+          until: chr_published_sha256 is succeeded
+          retries: 2
+          delay: 5
+      rescue:
+        - name: Read the SHA-256 through {{ github_proxy }}
+          ansible.builtin.uri:
+            url: "{{ github_proxy }}https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}.sha256"
+            return_content: true
+            status_code: [200, 404]
+            timeout: 30
+          register: chr_published_sha256
+          until: chr_published_sha256 is succeeded
+          retries: 3
+          delay: 10
+          when: github_proxy | default('', true) | length > 0
+
+        - name: Stop when github.com is unreachable and no proxy is set
+          ansible.builtin.fail:
+            msg: "github.com is unreachable from the VPS and github_proxy is empty."
+          when: github_proxy | default('', true) | length == 0
 
     - name: Require a published release for the requested version
       ansible.builtin.assert:
@@ -378,15 +474,35 @@
         fail_msg: "No valid SHA-256 for {{ chr_asset_name }}: '{{ chr_expected_sha256 }}'."
 
     - name: Download the CHR raw image to the target VPS
-      ansible.builtin.get_url:
-        url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}"
-        dest: /var/tmp/chr-image.img
-        mode: '0600'
-        force: true
-      register: chr_image_download
-      until: chr_image_download is succeeded
-      retries: 3
-      delay: 10
+      block:
+        - name: Download the CHR raw image from github.com
+          ansible.builtin.get_url:
+            url: "https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}"
+            dest: /var/tmp/chr-image.img
+            mode: '0600'
+            force: true
+            timeout: 30
+          register: chr_image_download
+          until: chr_image_download is succeeded
+          retries: 2
+          delay: 5
+      rescue:
+        - name: Stop when github.com is unreachable and no proxy is set
+          ansible.builtin.fail:
+            msg: "The CHR image cannot be downloaded from github.com and github_proxy is empty."
+          when: github_proxy | default('', true) | length == 0
+
+        - name: Download the CHR raw image through {{ github_proxy }}
+          ansible.builtin.get_url:
+            url: "{{ github_proxy }}https://github.com/{{ chr_image_repo }}/releases/download/{{ chr_release_tag }}/{{ chr_asset_name }}"
+            dest: /var/tmp/chr-image.img
+            mode: '0600'
+            force: true
+            timeout: 60
+          register: chr_image_download
+          until: chr_image_download is succeeded
+          retries: 3
+          delay: 10
 
     - name: Calculate image checksum and size
       ansible.builtin.stat:

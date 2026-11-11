@@ -53,6 +53,8 @@ caddy_basicauth_password: "change-me"
 # Optional overrides of the sources the playbook uses by default.
 # chr_image_repo: Medium1992/chr-container-rose
 # chr_asset_sha256: ""               # empty: taken from the release's .sha256 file
+# github_proxy: https://gh-proxy.com/  # fallback when github.com is unreachable; empty disables
+# debug_show_credentials: false      # true prints the SSH password and key to the log
 # ip_lists_base_url: https://raw.githubusercontent.com/Medium1992/MikroTik_IPlist/refs/heads/main/for_scripts
 # remnanode_image: ghcr.io/medium1992/remnanode-ros
 # caddy_image: ghcr.io/medium1992/caddy-tblocker
