@@ -175,4 +175,49 @@
     :log error ("bootstrap: firewall configuration: " . $firewallError)
 }
 
+# IPv6 is disabled above, but the RouterOS default IPv6 firewall is still
+# installed, so that enabling IPv6 later does not expose an open router.  The
+# rules are the stock defconf set; they rely on the LAN interface list, which
+# stays empty: with IPv6 on, nothing from outside is accepted until an
+# interface is added to LAN.
+:onerror ipv6FirewallError in={
+    /interface list add name=LAN comment="ansible: IPv6 defconf firewall trusts only LAN"
+    /ipv6 firewall {
+        address-list add list=bad_ipv6 address=::/128 comment="defconf: unspecified address"
+        address-list add list=bad_ipv6 address=::1 comment="defconf: lo"
+        address-list add list=bad_ipv6 address=fec0::/10 comment="defconf: site-local"
+        address-list add list=bad_ipv6 address=::ffff:0:0/96 comment="defconf: ipv4-mapped"
+        address-list add list=bad_ipv6 address=::/96 comment="defconf: ipv4 compat"
+        address-list add list=bad_ipv6 address=100::/64 comment="defconf: discard only "
+        address-list add list=bad_ipv6 address=2001:db8::/32 comment="defconf: documentation"
+        address-list add list=bad_ipv6 address=2001:10::/28 comment="defconf: ORCHID"
+        address-list add list=bad_ipv6 address=3ffe::/16 comment="defconf: 6bone"
+        filter add chain=input action=accept connection-state=established,related,untracked comment="defconf: accept established,related,untracked"
+        filter add chain=input action=drop connection-state=invalid comment="defconf: drop invalid"
+        filter add chain=input action=accept protocol=icmpv6 comment="defconf: accept ICMPv6"
+        filter add chain=input action=accept protocol=udp dst-port=33434-33534 comment="defconf: accept UDP traceroute"
+        filter add chain=input action=accept protocol=udp dst-port=546 src-address=fe80::/10 comment="defconf: accept DHCPv6-Client prefix delegation."
+        filter add chain=input action=accept protocol=udp dst-port=500,4500 comment="defconf: accept IKE"
+        filter add chain=input action=accept protocol=ipsec-ah comment="defconf: accept ipsec AH"
+        filter add chain=input action=accept protocol=ipsec-esp comment="defconf: accept ipsec ESP"
+        filter add chain=input action=accept ipsec-policy=in,ipsec comment="defconf: accept all that matches ipsec policy"
+        filter add chain=input action=drop in-interface-list=!LAN comment="defconf: drop everything else not coming from LAN"
+        filter add chain=forward action=fasttrack-connection connection-state=established,related comment="defconf: fasttrack6"
+        filter add chain=forward action=accept connection-state=established,related,untracked comment="defconf: accept established,related,untracked"
+        filter add chain=forward action=drop connection-state=invalid comment="defconf: drop invalid"
+        filter add chain=forward action=drop src-address-list=bad_ipv6 comment="defconf: drop packets with bad src ipv6"
+        filter add chain=forward action=drop dst-address-list=bad_ipv6 comment="defconf: drop packets with bad dst ipv6"
+        filter add chain=forward action=drop protocol=icmpv6 hop-limit=equal:1 comment="defconf: rfc4890 drop hop-limit=1"
+        filter add chain=forward action=accept protocol=icmpv6 comment="defconf: accept ICMPv6"
+        filter add chain=forward action=accept protocol=139 comment="defconf: accept HIP"
+        filter add chain=forward action=accept protocol=udp dst-port=500,4500 comment="defconf: accept IKE"
+        filter add chain=forward action=accept protocol=ipsec-ah comment="defconf: accept ipsec AH"
+        filter add chain=forward action=accept protocol=ipsec-esp comment="defconf: accept ipsec ESP"
+        filter add chain=forward action=accept ipsec-policy=in,ipsec comment="defconf: accept all that matches ipsec policy"
+        filter add chain=forward action=drop in-interface-list=!LAN comment="defconf: drop everything else not coming from LAN"
+    }
+} do={
+    :log error ("bootstrap: IPv6 firewall configuration: " . $ipv6FirewallError)
+}
+
 :put "autorun bootstrap complete"

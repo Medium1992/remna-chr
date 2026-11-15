@@ -109,6 +109,12 @@ inventory `inventory/controller.yml`. Параметры передаются ч
   в `input` добавляет источник в `PortScanners` на сутки, правило `raw`
   отбрасывает трафик из `PortScanners`. Правила DNS для bridge `Remna`
   добавляются перед PSD; PSD — предпоследнее правило `input`.
+- **IPv6 firewall.** Несмотря на отключённый IPv6, ставится штатный набор
+  MikroTik `defconf`: address-list `bad_ipv6` и правила `input`/`forward`.
+  Последние правила обеих цепочек отбрасывают всё не из interface list'а
+  `LAN`, который создаётся пустым: после включения IPv6 снаружи принимаются
+  только ICMPv6, traceroute, DHCPv6-PD, IKE/IPsec и ответный трафик, пока
+  интерфейс не добавлен в `LAN`.
 - **Swap.** Файловый диск `/swapsystem` (слот `swapsystem`,
   `chr_swap_disk_size`), отформатированный в ext4 и смонтированный; внутри —
   файловый диск `/swapsystem/swapfile` (слот `file-swapsystem-swapfile`,
