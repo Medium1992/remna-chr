@@ -105,10 +105,11 @@ inventory `inventory/controller.yml`. Параметры передаются ч
 - **Сервисы.** SSH, Winbox и `www-ssl` принимают подключения только из
   address-list'а `WhiteList`. Выключены telnet, ftp, www, api, api-ssl,
   reverse-proxy, MAC-server, neighbor discovery, bandwidth-server; IPv6
-  отключён. Правило PSD
-  в `input` добавляет источник в `PortScanners` на сутки, правило `raw`
+  отключён. Правила PSD для TCP и UDP
+  в `input` добавляют источник в `PortScanners` на сутки, правило `raw`
   отбрасывает трафик из `PortScanners`. Правила DNS для bridge `Remna`
-  добавляются перед PSD; PSD — предпоследнее правило `input`.
+  добавляются перед PSD; оба правила PSD стоят перед последним правилом
+  `input`.
 - **IPv6 firewall.** Несмотря на отключённый IPv6, ставится штатный набор
   MikroTik `defconf`: address-list `bad_ipv6` и правила `input`/`forward`.
   Последние правила обеих цепочек отбрасывают всё не из interface list'а

@@ -22,9 +22,9 @@
         bootstrap_input_drop: >-
           {{ bootstrap_filters.json | selectattr('comment', 'equalto', 'ansible: drop all other input') | first }}
 
-    # Container DNS rules go in front of the port-scan detection rule, so PSD
-    # stays directly before the final input drop.  Without the PSD rule they
-    # go in front of the drop rule.
+    # Container DNS rules go in front of the TCP port-scan detection rule, so
+    # the TCP and UDP PSD rules that follow it stay directly before the final
+    # input drop.  Without the TCP PSD rule they go in front of the drop rule.
     - name: Locate the bootstrap port-scan detection rule
       ansible.builtin.set_fact:
         bootstrap_input_anchor: >-

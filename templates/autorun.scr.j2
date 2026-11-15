@@ -165,6 +165,7 @@
     /ip firewall filter add action=accept chain=input protocol=icmp comment="ansible: allow ICMP"
     /ip firewall filter add action=accept chain=input dst-port=22,8291,{{ deployment_rest_port }} protocol=tcp src-address-list=WhiteList comment="ansible: SSH, Winbox and REST from WhiteList"
     /ip firewall filter add action=add-src-to-address-list chain=input protocol=tcp psd=21,3s,3,1 address-list=PortScanners address-list-timeout=1d comment="ansible: detect TCP port scanners"
+    /ip firewall filter add action=add-src-to-address-list chain=input protocol=udp psd=21,3s,3,1 address-list=PortScanners address-list-timeout=1d comment="ansible: detect UDP port scanners"
     /ip firewall filter add action=drop chain=input comment="ansible: drop all other input"
     /ip firewall filter add action=accept chain=forward connection-state=established,related,untracked comment="ansible: established,related,untracked"
     /ip firewall filter add action=drop chain=forward connection-state=invalid comment="ansible: drop invalid forward"

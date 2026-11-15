@@ -37,11 +37,12 @@
 4. Создаются interface list `WAN`, address-list `WhiteList`, правила
    `input`/`forward` и source NAT; MAC-server, neighbor discovery и
    bandwidth-server отключаются.
-5. Правило PSD `21,3s,3,1` в `input` добавляет источник в `PortScanners` на
-   один день; правило `raw prerouting` отбрасывает трафик с источником из
-   `PortScanners`. Исключения для `WhiteList` нет. На втором этапе правила
-   DNS для bridge `Remna` добавляются перед PSD, PSD остаётся предпоследним
-   правилом `input`.
+5. Правила PSD `21,3s,3,1` в `input`, сначала для TCP, следом для UDP,
+   добавляют источник в `PortScanners` на один день; правило `raw prerouting`
+   отбрасывает трафик с источником из `PortScanners`. Исключения для
+   `WhiteList` нет. На втором этапе правила DNS для bridge `Remna`
+   добавляются перед TCP PSD, оба правила PSD остаются непосредственно перед
+   последним правилом `input`.
 
 Последовательность записи: SysRq emergency remount, пауза,
 `dd bs=1024 conv=fsync`, пауза, SysRq sync, пауза, SysRq reboot.
